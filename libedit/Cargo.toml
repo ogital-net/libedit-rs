@@ -12,7 +12,7 @@ categories = ["command-line-interface"]
 include = ["src/**", "build.rs", "examples/**", "tests/**", "Cargo.toml", "../LICENSE", "../README.md"]
 
 [dependencies]
-libedit-sys = { path = "../libedit-sys", version = "0.2.0" }
+libedit-sys = { path = "../libedit-sys", version = "0.2.1" }
 libc = "0.2"
 
 [build-dependencies]
