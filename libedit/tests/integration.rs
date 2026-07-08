@@ -310,6 +310,79 @@ fn tokenizer_reset_and_reuse() {
     assert_eq!(words, vec!["x", "y", "z"]);
 }
 
+#[test]
+fn tokenizer_double_quotes_group_words() {
+    let _guard = lock();
+    let mut t = Tokenizer::new(None).unwrap();
+    let words = t.tokenize(r#"deploy "my server" now"#).unwrap();
+    assert_eq!(words, vec!["deploy", "my server", "now"]);
+}
+
+#[test]
+fn tokenizer_single_quotes_group_words() {
+    let _guard = lock();
+    let mut t = Tokenizer::new(None).unwrap();
+    let words = t.tokenize("set tag='v1 rc'").unwrap();
+    assert_eq!(words, vec!["set", "tag=v1 rc"]);
+}
+
+#[test]
+fn tokenizer_backslash_escapes_space() {
+    let _guard = lock();
+    let mut t = Tokenizer::new(None).unwrap();
+    let words = t.tokenize(r"a\ b c").unwrap();
+    assert_eq!(words, vec!["a b", "c"]);
+}
+
+#[test]
+fn tokenizer_backslash_in_double_quotes_is_kept() {
+    let _guard = lock();
+    let mut t = Tokenizer::new(None).unwrap();
+    // Inside double quotes a backslash before an ordinary char is literal, so
+    // both the backslash and the char are kept (matching sh / libedit).
+    let words = t.tokenize(r#""a\b""#).unwrap();
+    assert_eq!(words, vec![r"a\b"]);
+}
+
+#[test]
+fn tokenizer_empty_quotes_produce_empty_token() {
+    let _guard = lock();
+    let mut t = Tokenizer::new(None).unwrap();
+    let words = t.tokenize(r#"'' x"#).unwrap();
+    assert_eq!(words, vec!["", "x"]);
+}
+
+#[test]
+fn tokenizer_unterminated_quote_errors() {
+    let _guard = lock();
+    let mut t = Tokenizer::new(None).unwrap();
+    assert!(t.tokenize(r#"open "unfinished"#).is_err());
+}
+
+#[test]
+fn tokenizer_preserves_multibyte_tokens() {
+    let _guard = lock();
+    let mut t = Tokenizer::new(None).unwrap();
+    // Non-ASCII content must round-trip intact (no lossy conversion).
+    let words = t.tokenize("café \"naïve über\"").unwrap();
+    assert_eq!(words, vec!["café", "naïve über"]);
+}
+
+#[test]
+fn tokenizer_rejects_non_ascii_separators() {
+    let _guard = lock();
+    assert!(Tokenizer::new(Some("\u{2003}")).is_err());
+}
+
+#[test]
+fn tokenizer_accepts_owned_string_input() {
+    let _guard = lock();
+    let mut t = Tokenizer::new(None).unwrap();
+    let owned = String::from("one two");
+    let words = t.tokenize(owned).unwrap();
+    assert_eq!(words, vec!["one", "two"]);
+}
+
 /// Regression test for a prompt-rendering segfault.
 ///
 /// `EL_PROMPT` expects a function pointer, not a string. An earlier version

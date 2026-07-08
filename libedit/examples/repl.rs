@@ -202,7 +202,7 @@ fn main() -> Result<()> {
         "cli> "
     };
     loop {
-        let line = match editor.readline(prompt) {
+        let mut line = match editor.readline(prompt) {
             Ok(Some(line)) => line,
             Ok(None) => break,
             Err(Error::Interrupted) => {
@@ -212,16 +212,29 @@ fn main() -> Result<()> {
             Err(e) => return Err(e),
         };
 
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+        // Trim without allocating where possible. `truncate` drops trailing
+        // whitespace in place (the inner `&line` borrow resolves to a `Copy`
+        // usize before the `&mut` truncate). `start` is the count of leading
+        // whitespace bytes; when it is 0 the buffer is already fully trimmed
+        // and can be *moved* into the tokenizer, avoiding a copy entirely.
+        line.truncate(line.trim_end().len());
+        let start = line.len() - line.trim_start().len();
+        if line.len() == start {
+            continue; // empty or whitespace-only
         }
 
-        history.add(trimmed)?;
+        history.add(&line[start..])?;
         tokenizer.reset();
-        let words = tokenizer.tokenize(trimmed)?;
+        // `words` borrow the tokenizer, not `line`, so moving `line` in is
+        // fine. No leading whitespace -> move (zero-copy); otherwise pass the
+        // borrowed slice, which `tokenize` copies into its `CString`.
+        let words = if start == 0 {
+            tokenizer.tokenize(line)?
+        } else {
+            tokenizer.tokenize(&line[start..])?
+        };
 
-        match words.first().map(String::as_str) {
+        match words.first().copied() {
             Some("quit") | Some("exit") => break,
             Some("help") => {
                 let max = COMMANDS.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
