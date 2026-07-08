@@ -26,18 +26,22 @@
 //! 1. Write a small C shim that wraps specific variadic call patterns
 //!    with fixed-argument functions.
 //!
-//! 2. Use a higher-level crate (such as a future `libedit` crate) that
-//!    provides safe wrappers and includes the necessary C shim.
+//! 2. Use the companion [`libedit`](https://crates.io/crates/libedit)
+//!    crate, which provides safe wrappers and includes the necessary C shim.
 //!
 //! This crate intentionally keeps the raw variadic bindings available so
 //! advanced users are not restricted, but they are **use at your own risk**.
 
 // When the `bindgen` feature is enabled, use freshly generated bindings.
-// Otherwise, use the pre-generated bindings shipped with the crate.
+// Otherwise, use the pre-generated bindings shipped with the crate
+// (platform-specific: macOS ships an older libedit with fewer symbols).
 #[cfg(feature = "bindgen")]
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-#[cfg(not(feature = "bindgen"))]
+#[cfg(all(not(feature = "bindgen"), target_os = "macos"))]
+include!("bindings-macos.rs");
+
+#[cfg(all(not(feature = "bindgen"), not(target_os = "macos")))]
 include!("bindings.rs");
 
 // Safety assertions at compile time

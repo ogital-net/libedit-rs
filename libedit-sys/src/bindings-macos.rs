@@ -38,8 +38,6 @@ pub const EL_REFRESH: u32 = 20;
 pub const EL_PROMPT_ESC: u32 = 21;
 pub const EL_RPROMPT_ESC: u32 = 22;
 pub const EL_RESIZE: u32 = 23;
-pub const EL_ALIAS_TEXT: u32 = 24;
-pub const EL_SAFEREAD: u32 = 25;
 pub const H_FUNC: u32 = 0;
 pub const H_SETSIZE: u32 = 1;
 pub const H_GETSIZE: u32 = 2;
@@ -66,8 +64,7 @@ pub const H_DEL: u32 = 22;
 pub const H_NEXT_EVDATA: u32 = 23;
 pub const H_DELDATA: u32 = 24;
 pub const H_REPLACE: u32 = 25;
-pub const H_SAVE_FP: u32 = 26;
-pub const H_NSAVE_FP: u32 = 27;
+pub type __darwin_wchar_t = ::std::os::raw::c_int;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct editline {
@@ -97,17 +94,6 @@ unsafe extern "C" {
         arg2: *mut FILE,
         arg3: *mut FILE,
         arg4: *mut FILE,
-    ) -> *mut EditLine;
-}
-unsafe extern "C" {
-    pub fn el_init_fd(
-        arg1: *const ::std::os::raw::c_char,
-        arg2: *mut FILE,
-        arg3: *mut FILE,
-        arg4: *mut FILE,
-        arg5: ::std::os::raw::c_int,
-        arg6: ::std::os::raw::c_int,
-        arg7: ::std::os::raw::c_int,
     ) -> *mut EditLine;
 }
 unsafe extern "C" {
@@ -165,19 +151,6 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn el_deletestr(arg1: *mut EditLine, arg2: ::std::os::raw::c_int);
-}
-unsafe extern "C" {
-    pub fn el_replacestr(
-        arg1: *mut EditLine,
-        arg2: *const ::std::os::raw::c_char,
-    ) -> ::std::os::raw::c_int;
-}
-unsafe extern "C" {
-    pub fn el_deletestr1(
-        arg1: *mut EditLine,
-        arg2: ::std::os::raw::c_int,
-        arg3: ::std::os::raw::c_int,
-    ) -> ::std::os::raw::c_int;
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -247,7 +220,7 @@ unsafe extern "C" {
         arg4: *mut *mut *const ::std::os::raw::c_char,
     ) -> ::std::os::raw::c_int;
 }
-pub type wchar_t = ::std::os::raw::c_uint;
+pub type wchar_t = __darwin_wchar_t;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct lineinfow {
@@ -288,16 +261,10 @@ unsafe extern "C" {
     pub fn el_wget(arg1: *mut EditLine, arg2: ::std::os::raw::c_int, ...) -> ::std::os::raw::c_int;
 }
 unsafe extern "C" {
-    pub fn el_cursor(arg1: *mut EditLine, arg2: ::std::os::raw::c_int) -> ::std::os::raw::c_int;
-}
-unsafe extern "C" {
     pub fn el_wline(arg1: *mut EditLine) -> *const LineInfoW;
 }
 unsafe extern "C" {
     pub fn el_winsertstr(arg1: *mut EditLine, arg2: *const wchar_t) -> ::std::os::raw::c_int;
-}
-unsafe extern "C" {
-    pub fn el_wreplacestr(arg1: *mut EditLine, arg2: *const wchar_t) -> ::std::os::raw::c_int;
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

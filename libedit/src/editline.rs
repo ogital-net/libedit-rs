@@ -618,11 +618,16 @@ impl EditLine {
         if rc != 0 {
             return Err(Error::operation(EL_ADDFN as i32, rc));
         }
-        for key in [c"^F", c"\\e[C"] {
-            let rc = unsafe { shim::el_bind(self.inner, key, apply) };
-            if rc != 0 {
-                return Err(Error::operation(EL_BIND as i32, rc));
-            }
+        // Only bind Ctrl-F to suggestion-accept. Right-arrow (`\e[C`) is
+        // intentionally left on libedit's native `ed-next-char` so that
+        // cursor movement is handled by libedit itself -- this keeps behavior
+        // consistent across platforms (Apple's older libedit and modern
+        // Linux/BSD libedit have the same `ed-next-char` semantics at the
+        // key-binding level) and avoids reimplementing cursor-motion logic
+        // that would need access to private internals.
+        let rc = unsafe { shim::el_bind(self.inner, c"^F", apply) };
+        if rc != 0 {
+            return Err(Error::operation(EL_BIND as i32, rc));
         }
         Ok(())
     }
@@ -1307,16 +1312,13 @@ fn suggest_apply_impl(el: *mut libedit_sys::EditLine) -> c_uchar {
     }
 }
 
-/// Move the cursor one character to the right, the default action for the keys
-/// (`Ctrl-F` / Right-arrow) bound to the suggestion-accept handler. Used as the
-/// fallback when there is no suggestion to commit, so those keys keep working
-/// as ordinary cursor movement. `el_cursor` clamps at the end of the line, so
-/// this is a no-op there (correct Right-arrow-at-EOL behavior).
-fn forward_char(el: *mut libedit_sys::EditLine) -> c_uchar {
-    // SAFETY: `el` is a live editor pointer for the duration of the callback;
-    // `el_cursor` only adjusts and clamps the internal cursor offset.
-    unsafe { el_cursor(el, 1) };
-    CC_CURSOR as c_uchar
+/// Fallback when Ctrl-F is pressed but there is no suggestion to accept.
+///
+/// Since Right-arrow is left on libedit's native `ed-next-char` (not rebound),
+/// only Ctrl-F reaches this path. With nothing to accept, it simply does
+/// nothing -- the cursor stays where it is.
+fn forward_char(_el: *mut libedit_sys::EditLine) -> c_uchar {
+    CC_NORM as c_uchar
 }
 
 /// Erase inline suggestion ghost text currently drawn to the right of the
