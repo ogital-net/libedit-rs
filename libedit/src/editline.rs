@@ -880,9 +880,6 @@ impl std::io::Write for Writer<'_> {
 /// [`Writer`] adapter and the internal candidate-listing path so both go
 /// through the same, correctly-ordered stdio buffer.
 fn fwrite_bytes(stream: *mut FILE, bytes: &[u8]) -> usize {
-    // Diagnostic: record everything we emit (escapes visualized) when
-    // LIBEDIT_TRACE is set. No-op otherwise.
-    crate::trace::bytes("out", bytes);
     if stream.is_null() {
         // SAFETY: best-effort write of a byte buffer to fd 2.
         let n = unsafe { libc::write(2, bytes.as_ptr() as *const c_void, bytes.len()) };
@@ -1242,16 +1239,6 @@ fn draw_suggestion_ghost(el: *mut libedit_sys::EditLine) {
     let to_column = caret_pos - (row * term_cols);
     use std::fmt::Write;
     let _ = write!(ctx.suggest_buf, "\x1b[{}G", to_column + 1);
-
-    if crate::trace::enabled() {
-        crate::trace::note(&format!(
-            "ghost: line={line:?} cursor={cursor} suggest={sug_text:?} \
-             prompt_cols={} caret_pos={caret_pos} term_cols={term_cols} \
-             new_total={new_total} -> col={}",
-            ctx.prompt_cols,
-            to_column + 1,
-        ));
-    }
 
     fwrite_bytes(stream, ctx.suggest_buf.as_bytes());
     unsafe { libc::fflush(stream as *mut libc::FILE) };

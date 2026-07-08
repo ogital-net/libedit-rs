@@ -36,7 +36,6 @@ pub mod term;
 pub mod tokenizer;
 
 mod shim;
-mod trace;
 
 pub use completion::{longest_common_prefix, CandidateStyler, Completer, Completion, LineContext};
 pub use editline::{Action, ActionContext, EditLine, Editor, Writer};
