@@ -85,6 +85,37 @@ fn history_path() -> PathBuf {
     p
 }
 
+/// No-op SIGINT handler.
+///
+/// libedit's signal handling (enabled via [`EditLine::set_signal_handling`])
+/// traps SIGINT during `readline`, restores whatever handler was installed
+/// beforehand, and re-raises the signal. If that prior disposition is the
+/// default (`SIG_DFL`), the re-raised SIGINT *terminates the process* before
+/// `readline` can return -- so Ctrl-C would kill the REPL with no output.
+///
+/// Installing this non-terminating handler prevents that: the re-raised signal
+/// runs this no-op, the interrupted read surfaces as `EINTR`, and `readline`
+/// returns [`Error::Interrupted`] so the loop below can print `^C` and carry
+/// on. It is registered *without* `SA_RESTART` (see `install_sigint_handler`)
+/// so the read is not silently restarted.
+extern "C" fn on_sigint(_signo: libc::c_int) {}
+
+/// Install [`on_sigint`] for SIGINT with no `SA_RESTART`, so a Ctrl-C during
+/// `readline` is reported as [`Error::Interrupted`] rather than killing the
+/// process.
+fn install_sigint_handler() {
+    // SAFETY: `on_sigint` is async-signal-safe (it does nothing). We zero a
+    // `sigaction`, point it at the handler with `sa_flags == 0` (crucially no
+    // SA_RESTART, so the interrupted read yields EINTR), and install it.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_sigint as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = 0;
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+    }
+}
+
 /// Print the commands matching `prefix` in Juniper-style aligned columns.
 fn print_context_help(out: &mut impl Write, prefix: &str) {
     let matches: Vec<_> = COMMANDS
@@ -183,6 +214,13 @@ fn main() -> Result<()> {
     editor.bind_key("?", &help_action)?;
 
     // -- Editor settings --
+    // Enable libedit's signal handling (SIGWINCH resize, etc.). On its own
+    // this is not enough to make Ctrl-C recoverable: libedit re-raises the
+    // trapped SIGINT against the previously-installed disposition, which
+    // defaults to "terminate". Installing a non-terminating handler first lets
+    // `readline` return `Error::Interrupted` instead of the process being
+    // killed. See `install_sigint_handler`.
+    install_sigint_handler();
     editor.set_signal_handling(true)?;
 
     // -- Banner --

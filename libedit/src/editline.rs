@@ -655,6 +655,27 @@ impl EditLine {
     /// When enabled, libedit installs handlers for signals such as
     /// `SIGWINCH` so the display stays correct across terminal resizes.
     ///
+    /// # Recovering from Ctrl-C (`SIGINT`)
+    ///
+    /// Enabling this is **not sufficient on its own** to make Ctrl-C return
+    /// [`Error::Interrupted`] from [`readline`](Self::readline). While a line
+    /// is being read, libedit traps `SIGINT`, restores whatever `SIGINT`
+    /// disposition existed *before* the read, and then re-raises the signal.
+    /// If the application never installed one, that prior disposition is the
+    /// default (`SIG_DFL`), so the re-raised `SIGINT` **terminates the
+    /// process** before `readline` can return -- Ctrl-C kills the program
+    /// instead of surfacing as an error.
+    ///
+    /// To make Ctrl-C recoverable, the application must install its own
+    /// non-terminating `SIGINT` handler (it may be a no-op) **before** reading,
+    /// and crucially install it *without* `SA_RESTART`. With `SA_RESTART` the
+    /// interrupted `read(2)` is automatically restarted and never reports
+    /// `EINTR`, so libedit cannot detect the interruption. Installed correctly
+    /// (e.g. via `sigaction` with `sa_flags == 0`), the re-raised signal runs
+    /// the handler, the read fails with `EINTR`, and `readline` returns
+    /// [`Error::Interrupted`]. See the `repl` example for a complete
+    /// implementation.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Operation`] if libedit rejects the parameter change.
@@ -1254,14 +1275,14 @@ extern "C" fn suggest_apply_trampoline(el: *mut libedit_sys::EditLine, _ch: i32)
 
 fn suggest_apply_impl(el: *mut libedit_sys::EditLine) -> c_uchar {
     let Some(ctx) = context_from(el) else {
-        return CC_NORM as c_uchar;
+        return forward_char(el);
     };
     let Some(suggester) = ctx.suggester.as_mut() else {
-        return CC_NORM as c_uchar;
+        return forward_char(el);
     };
     let info = unsafe { el_line(el) };
     if info.is_null() {
-        return CC_NORM as c_uchar;
+        return forward_char(el);
     }
     let (line, cursor) = unsafe { line_and_cursor(&*info) };
     let at_end = cursor >= line.len();
@@ -1276,8 +1297,26 @@ fn suggest_apply_impl(el: *mut libedit_sys::EditLine) -> c_uchar {
             }
             CC_REDISPLAY as c_uchar
         }
-        _ => CC_NORM as c_uchar,
+        // Nothing to accept (no suggestion, or the cursor isn't at end of
+        // line): fall through to the key's default forward-character motion.
+        // Both keys bound here -- Ctrl-F and Right-arrow -- are `forward-char`
+        // in the default keymap, so binding them for suggestion-accept must
+        // not disable ordinary rightward cursor movement (e.g. when editing a
+        // line recalled from history).
+        _ => forward_char(el),
     }
+}
+
+/// Move the cursor one character to the right, the default action for the keys
+/// (`Ctrl-F` / Right-arrow) bound to the suggestion-accept handler. Used as the
+/// fallback when there is no suggestion to commit, so those keys keep working
+/// as ordinary cursor movement. `el_cursor` clamps at the end of the line, so
+/// this is a no-op there (correct Right-arrow-at-EOL behavior).
+fn forward_char(el: *mut libedit_sys::EditLine) -> c_uchar {
+    // SAFETY: `el` is a live editor pointer for the duration of the callback;
+    // `el_cursor` only adjusts and clamps the internal cursor offset.
+    unsafe { el_cursor(el, 1) };
+    CC_CURSOR as c_uchar
 }
 
 /// Erase inline suggestion ghost text currently drawn to the right of the
