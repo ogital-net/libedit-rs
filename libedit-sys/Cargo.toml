@@ -1,0 +1,37 @@
+[package]
+name = "libedit-sys"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Low-level FFI bindings to the libedit line-editing library"
+license.workspace = true
+repository.workspace = true
+readme = "../README.md"
+links = "edit"
+keywords = ["libedit", "editline", "ffi", "bindings"]
+categories = ["external-ffi-bindings"]
+include = ["src/**", "build.rs", "Cargo.toml", "../LICENSE", "../README.md"]
+
+[features]
+default = []
+# Enable on-the-fly bindings generation via bindgen + libclang.
+# Without this, pre-generated bindings (src/bindings.rs) are used.
+bindgen = ["bindgen-dep"]
+# Link against a static libedit.a instead of the shared library. Useful for
+# distroless / musl targets. Point LIBEDIT_LIB_DIR at a directory containing
+# libedit.a (and optionally libncurses.a).
+static = []
+
+[build-dependencies]
+bindgen-dep = { package = "bindgen", version = "0.71", optional = true }
+
+[dependencies]
+
+[dev-dependencies]
+libc = "0.2"
+
+[package.metadata.docs.rs]
+# docs.rs only needs libedit-dev (headers are in default include path).
+# No clang/bindgen needed -- we use pre-generated bindings for docs.
+features = []
+#     Arch Linux:       pacman -S libedit clang

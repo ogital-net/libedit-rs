@@ -1,0 +1,38 @@
+[workspace]
+members = ["libedit-sys", "libedit"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.82"
+license = "BSD-2-Clause"
+repository = "https://github.com/ogital-net/libedit-rs"
+homepage = "https://github.com/ogital-net/libedit-rs"
+
+[workspace.metadata.docs.rs]
+# docs.rs only needs libedit-dev (headers are in default include path).
+# No clang/bindgen needed -- we use pre-generated bindings for docs.
+# We document both crates.
+no-default-features = true
+
+# System dependencies:
+#
+# The -dev/-devel packages are ALWAYS required -- even without the `bindgen`
+# feature -- because the linker needs libedit.so (the unversioned symlink)
+# to resolve `-ledit` at build time.
+#
+# Building without `bindgen` feature (default):
+#   Only libedit needed (no libclang/LLVM):
+#
+#     Debian/Ubuntu:   apt install libedit-dev
+#     Fedora/RHEL:     dnf install libedit-devel
+#     macOS (Homebrew): brew install libedit
+#     Arch Linux:       pacman -S libedit
+#
+# Building with `bindgen` feature:
+#   Also needs libclang:
+#
+#     Debian/Ubuntu:   apt install libedit-dev libclang-dev
+#     Fedora/RHEL:     dnf install libedit-devel clang-devel
+#     macOS (Homebrew): brew install libedit llvm && export LIBCLANG_PATH=$(brew --prefix llvm)/lib
+#     Arch Linux:       pacman -S libedit clang

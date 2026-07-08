@@ -1,0 +1,74 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'libedit-sys-v*'
+      - 'libedit-v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: publish to crates.io
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev
+
+      - name: Determine which crate to publish
+        id: crate
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ "$tag" == libedit-sys-v* ]]; then
+            echo "name=libedit-sys" >> "$GITHUB_OUTPUT"
+            echo "version=${tag#libedit-sys-v}" >> "$GITHUB_OUTPUT"
+          elif [[ "$tag" == libedit-v* ]]; then
+            echo "name=libedit" >> "$GITHUB_OUTPUT"
+            echo "version=${tag#libedit-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Unrecognized tag format: $tag"
+            exit 1
+          fi
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          manifest_version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import json,sys; pkgs=json.load(sys.stdin)['packages']; print(next(p['version'] for p in pkgs if p['name']=='${{ steps.crate.outputs.name }}'))")"
+          if [ "${{ steps.crate.outputs.version }}" != "$manifest_version" ]; then
+            echo "::error::Tag version (${{ steps.crate.outputs.version }}) does not match Cargo.toml version ($manifest_version)"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --workspace --verbose
+
+      - name: Dry-run package
+        run: cargo package -p ${{ steps.crate.outputs.name }} --verbose
+
+      - name: Publish libedit-sys (dependency, if needed)
+        if: steps.crate.outputs.name == 'libedit'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # Publish libedit-sys first if its current version isn't on crates.io yet
+          sys_version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import json,sys; pkgs=json.load(sys.stdin)['packages']; print(next(p['version'] for p in pkgs if p['name']=='libedit-sys'))")"
+          if ! cargo search libedit-sys --limit 1 | grep -q "\"$sys_version\""; then
+            cargo publish -p libedit-sys --verbose
+            sleep 30
+          fi
+
+      - name: Publish ${{ steps.crate.outputs.name }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p ${{ steps.crate.outputs.name }} --verbose

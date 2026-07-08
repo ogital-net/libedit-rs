@@ -1,0 +1,19 @@
+[package]
+name = "libedit"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Safe Rust bindings to the libedit line-editing library"
+license.workspace = true
+repository.workspace = true
+readme = "../README.md"
+keywords = ["libedit", "editline", "line-editor", "readline"]
+categories = ["command-line-interface"]
+include = ["src/**", "build.rs", "examples/**", "tests/**", "Cargo.toml", "../LICENSE", "../README.md"]
+
+[dependencies]
+libedit-sys = { path = "../libedit-sys", version = "0.1.0" }
+libc = "0.2"
+
+[build-dependencies]
+cc = "1"

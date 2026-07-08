@@ -1,0 +1,40 @@
+# cargo-deny configuration for libedit
+# See: https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Advisory checks: vulnerability/unsound/notice now always error by default.
+# Use `ignore` to exempt specific RUSTSEC IDs.
+yanked = "deny"
+unmaintained = "workspace"
+unsound = "workspace"
+
+[licenses]
+# libedit-sys is BSD-2-Clause
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+]
+# Build dependencies (bindgen, clang-sys) pull in some additional licenses
+exceptions = []
+
+[[licenses.clarify]]
+name = "ring"
+expression = "ISC AND MIT AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+skip = [
+    { crate = "shlex@1", reason = "bindgen still depends on shlex 1.x; cc uses 2.x" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []
