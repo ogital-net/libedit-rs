@@ -56,6 +56,12 @@ struct Context {
     /// on, then flushed, so the two stay correctly ordered. Not owned here --
     /// it aliases `EditLine::streams[1]`, which is closed in `Drop`.
     out: *mut FILE,
+    /// The raw file descriptor libedit reads input from -- `fileno` of the
+    /// stdin `FILE*` handed to `el_init` (a *dup* of fd 0, not fd 0 itself).
+    /// The suggestion get-character trampoline reads from this fd so it stays
+    /// in lockstep with libedit's own `read(el_infd, ...)`, rather than
+    /// assuming fd 0 (which may be reassigned after the editor is created).
+    in_fd: i32,
     /// Backing storage for the current hint text as a NUL-terminated wchar_t
     /// array. The right-prompt trampoline returns a pointer into this buffer.
     /// Using wide chars avoids locale-dependent mbstowcs conversion.
@@ -163,6 +169,12 @@ impl EditLine {
             return Err(Error::Null);
         }
 
+        // Recover the descriptor libedit will read from: `fileno` of the
+        // stdin stream we just handed it. This is the dup of fd 0 created by
+        // `open_std_stream`, and it is what libedit's `read(el_infd, ...)`
+        // uses -- so the suggestion trampoline must read from the same fd.
+        let in_fd = unsafe { libc::fileno(stdin as *mut libc::FILE) };
+
         // Allocate the context on the heap and register it as client data so
         // the prompt/completion trampolines can find it. `default_prompt`
         // starts empty; `readline` overwrites it before each call.
@@ -173,6 +185,7 @@ impl EditLine {
             candidate_styler: None,
             list_buf: String::new(),
             out: stdout,
+            in_fd,
             hint_wide: vec![0], // NUL-terminated empty wide string
             suggester: None,
             suggest_prefix: String::new(),
@@ -1092,7 +1105,29 @@ fn complete_impl(el: *mut libedit_sys::EditLine) -> c_uchar {
 /// code battles.
 ///
 /// When no suggester is registered this is a transparent passthrough: read a
-/// byte from fd 0 and return it.
+/// character from libedit's input fd and return it.
+///
+/// # Character decoding
+///
+/// libedit's `el_rfunc_t` contract is *one complete `wchar_t` per call* (see
+/// `read_char` in libedit's `read.c`, which loops on `mbrtowc` internally and
+/// only returns once a full character has been assembled). We mirror that: a
+/// single call reads the UTF-8 lead byte, then the exact number of
+/// continuation bytes the sequence requires, and decodes them to one Unicode
+/// scalar. Because a partial sequence never escapes the call, no cross-call
+/// state is needed. Decoding is done directly (not via `mbrtowc`), so it is
+/// independent of `LC_CTYPE` -- matching the wide strings we hand libedit for
+/// prompts/hints.
+///
+/// # Input descriptor
+///
+/// Bytes are read from the editor's own input fd (`ctx.in_fd` -- `fileno` of
+/// the stdin stream passed to `el_init`, a dup of fd 0), *not* a hard-coded
+/// fd 0. This keeps us reading from exactly the descriptor libedit's builtin
+/// `read(el_infd, ...)` uses, so the two stay consistent even if fd 0 is later
+/// reassigned. Like libedit, we read the fd directly rather than through the
+/// stdio `FILE*` buffer. Falls back to fd 0 only if the context is somehow
+/// unavailable.
 unsafe extern "C" fn getcfn_trampoline(el: *mut libedit_sys::EditLine, out: *mut wchar_t) -> i32 {
     // Draw suggestion ghost text BEFORE blocking for the next byte. At this
     // point libedit has already refreshed its display for the previous
@@ -1101,14 +1136,46 @@ unsafe extern "C" fn getcfn_trampoline(el: *mut libedit_sys::EditLine, out: *mut
     let result = catch_unwind(AssertUnwindSafe(|| draw_suggestion_ghost(el)));
     let _ = result; // ignore panic -- just skip the ghost
 
-    // Read one byte from stdin (fd 0). This blocks until input arrives.
-    let mut ch: u8 = 0;
-    let n = unsafe { libc::read(0, &mut ch as *mut u8 as *mut c_void, 1) };
+    // Resolve libedit's input fd from the context; fall back to fd 0.
+    let in_fd = context_from(el).map_or(0, |ctx| ctx.in_fd);
+
+    // Read the lead byte. This blocks until input arrives.
+    let mut lead: u8 = 0;
+    let n = unsafe { libc::read(in_fd, &mut lead as *mut u8 as *mut c_void, 1) };
     if n <= 0 {
         return if n == 0 { 0 } else { -1 }; // EOF or error
     }
-    // Write a full wchar_t -- libedit's el_rfunc_t expects wchar_t*, not char*.
-    unsafe { *out = ch as wchar_t };
+
+    // Determine how many bytes this UTF-8 sequence occupies from the lead
+    // byte. ASCII (and, defensively, any stray continuation/invalid lead byte,
+    // which `utf8_char_len` maps to 1) takes the fast path and returns as-is.
+    let total = utf8_char_len(lead);
+    if total == 1 {
+        unsafe { *out = lead as wchar_t };
+        return 1;
+    }
+
+    // Multi-byte: read the remaining continuation bytes and decode. We read
+    // one at a time so we never block waiting for bytes beyond this character.
+    let mut buf = [0u8; 4];
+    buf[0] = lead;
+    for slot in buf.iter_mut().take(total).skip(1) {
+        let mut b: u8 = 0;
+        let n = unsafe { libc::read(in_fd, &mut b as *mut u8 as *mut c_void, 1) };
+        if n <= 0 {
+            return if n == 0 { 0 } else { -1 };
+        }
+        *slot = b;
+    }
+
+    // Decode the assembled bytes to a single scalar value. On invalid UTF-8,
+    // fall back to the U+FFFD replacement character rather than failing the
+    // read, so a stray byte can't wedge the editor.
+    let cp = match std::str::from_utf8(&buf[..total]) {
+        Ok(s) => s.chars().next().map(|c| c as u32).unwrap_or(0xFFFD),
+        Err(_) => 0xFFFD,
+    };
+    unsafe { *out = cp as wchar_t };
     1
 }
 
