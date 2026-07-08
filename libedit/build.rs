@@ -2,6 +2,12 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // docs.rs builds in a sandbox without system headers. Skip the C
+    // compilation — rustdoc doesn't link a binary.
+    if env::var("DOCS_RS").is_ok() {
+        return;
+    }
+
     // Support non-standard install locations via LIBEDIT_INCLUDE_DIR,
     // consistent with the libedit-sys build.rs.
     let mut cc = cc::Build::new();

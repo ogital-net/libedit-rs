@@ -17,3 +17,8 @@ libc = "0.2"
 
 [build-dependencies]
 cc = "1"
+
+[package.metadata.docs.rs]
+# build.rs detects DOCS_RS and skips compiling shim.c, so no system
+# libedit headers are required on docs.rs.
+rustdoc-args = ["--cfg", "docsrs"]

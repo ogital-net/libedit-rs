@@ -2,6 +2,12 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // docs.rs builds in a sandbox without system libraries. Skip link
+    // directives — rustdoc doesn't actually link a binary.
+    if env::var("DOCS_RS").is_ok() {
+        return;
+    }
+
     // Support non-standard install locations via environment variables.
     //   LIBEDIT_INCLUDE_DIR  -- path containing histedit.h
     //   LIBEDIT_LIB_DIR      -- path containing libedit.so / libedit.dylib / edit.lib

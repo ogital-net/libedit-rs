@@ -31,7 +31,7 @@ bindgen-dep = { package = "bindgen", version = "0.71", optional = true }
 libc = "0.2"
 
 [package.metadata.docs.rs]
-# docs.rs only needs libedit-dev (headers are in default include path).
-# No clang/bindgen needed -- we use pre-generated bindings for docs.
+# build.rs detects DOCS_RS and skips link directives, so no system
+# libedit-dev is required. Pre-generated bindings are used (no bindgen).
 features = []
 #     Arch Linux:       pacman -S libedit clang
