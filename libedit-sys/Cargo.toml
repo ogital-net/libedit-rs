@@ -26,6 +26,7 @@ static = []
 bindgen-dep = { package = "bindgen", version = "0.71", optional = true }
 
 [dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 libc = "0.2"

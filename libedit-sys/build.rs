@@ -68,11 +68,10 @@ fn generate_bindings() {
         .allowlist_type("historyW")
         .allowlist_type("tokenizer")
         .allowlist_type("tokenizerW")
-        .allowlist_type("wchar_t")
-        // `FILE` is only used behind a pointer (`*mut FILE`). Block bindgen's
-        // platform-specific sized definition and supply our own zero-sized
-        // opaque struct, so the type is identical on every target and cannot
-        // be misused by value or via `size_of`.
+        .blocklist_type("wchar_t")
+        .blocklist_type("__darwin_wchar_t")
+        // `FILE` is only used behind a pointer (`*mut FILE`). Use libc::FILE
+        // which is the canonical opaque type for this.
         .blocklist_type("FILE")
         // Block platform stdio internals that bindgen drags in transitively.
         // Linux (glibc):
@@ -90,9 +89,9 @@ fn generate_bindings() {
         .blocklist_type("fpos_t")
         .blocklist_type("__int64_t")
         .blocklist_type("__darwin_off_t")
-        .raw_line("#[repr(C)]")
-        .raw_line("#[derive(Debug, Copy, Clone)]")
-        .raw_line("pub struct FILE { _unused: [u8; 0] }")
+        .ctypes_prefix("libc")
+        .raw_line("use libc;")
+        .raw_line("pub use libc::{FILE, wchar_t};")
         .derive_debug(true)
         .derive_default(true)
         .generate_comments(false)

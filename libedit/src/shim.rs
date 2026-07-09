@@ -7,10 +7,9 @@
 use libedit_sys::*;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_uchar};
-use std::ptr;
 
-/// Trampoline type for the libedit prompt callback: `char *(*)(EditLine *)`.
-pub(crate) type PromptFn = unsafe extern "C" fn(*mut EditLine) -> *mut c_char;
+/// Trampoline type for the libedit prompt callback: `wchar_t *(*)(EditLine *)`.
+pub(crate) type PromptFn = unsafe extern "C" fn(*mut EditLine) -> *mut wchar_t;
 
 /// Trampoline type for a libedit editor function bound via `EL_ADDFN`:
 /// `unsigned char (*)(EditLine *, int)`.
@@ -26,9 +25,18 @@ extern "C" {
     pub(crate) fn shim_el_set(el: *mut EditLine, op: i32, arg: usize) -> i32;
     pub(crate) fn shim_el_get(el: *mut EditLine, op: i32, arg: *mut usize) -> i32;
     pub(crate) fn shim_el_set_clientdata(el: *mut EditLine, data: *mut std::ffi::c_void) -> i32;
-    pub(crate) fn shim_el_set_prompt_esc_fn(el: *mut EditLine, f: PromptFn, delim: c_char) -> i32;
-    pub(crate) fn shim_el_set_rprompt_esc_fn(el: *mut EditLine, f: PromptFn, delim: c_char) -> i32;
-    pub(crate) fn shim_el_gets(el: *mut EditLine, count: *mut i32, err: *mut i32) -> *const c_char;
+    pub(crate) fn shim_el_wset_prompt_esc_fn(el: *mut EditLine, f: PromptFn, delim: wchar_t)
+        -> i32;
+    pub(crate) fn shim_el_wset_rprompt_esc_fn(
+        el: *mut EditLine,
+        f: PromptFn,
+        delim: wchar_t,
+    ) -> i32;
+    pub(crate) fn shim_el_wgets(
+        el: *mut EditLine,
+        count: *mut i32,
+        err: *mut i32,
+    ) -> *const wchar_t;
     pub(crate) fn shim_el_addfn(
         el: *mut EditLine,
         name: *const c_char,
@@ -38,23 +46,26 @@ extern "C" {
     pub(crate) fn shim_el_bind(el: *mut EditLine, key: *const c_char, fnname: *const c_char)
         -> i32;
     pub(crate) fn shim_el_set_getcfn(el: *mut EditLine, f: GetcFn) -> i32;
-    pub(crate) fn shim_el_set_hist(el: *mut EditLine, h: *mut History) -> i32;
+    pub(crate) fn shim_el_wset_hist(el: *mut EditLine, h: *mut HistoryW) -> i32;
 
-    pub(crate) fn shim_history_enter(h: *mut History, ev: *mut HistEvent, s: *const c_char) -> i32;
-    pub(crate) fn shim_history_first(h: *mut History, ev: *mut HistEvent) -> i32;
-    pub(crate) fn shim_history_getsize(h: *mut History, ev: *mut HistEvent) -> i32;
-    pub(crate) fn shim_history_setsize(h: *mut History, ev: *mut HistEvent, n: i32) -> i32;
-    pub(crate) fn shim_history_setunique(h: *mut History, ev: *mut HistEvent, unique: i32) -> i32;
-    pub(crate) fn shim_history_clear(h: *mut History, ev: *mut HistEvent) -> i32;
-    pub(crate) fn shim_history_load(
-        h: *mut History,
-        ev: *mut HistEvent,
-        path: *const c_char,
+    pub(crate) fn shim_history_w_op(h: *mut HistoryW, ev: *mut HistEventW, op: i32) -> i32;
+    pub(crate) fn shim_history_w_op_int(
+        h: *mut HistoryW,
+        ev: *mut HistEventW,
+        op: i32,
+        arg: i32,
     ) -> i32;
-    pub(crate) fn shim_history_save(
-        h: *mut History,
-        ev: *mut HistEvent,
-        path: *const c_char,
+    pub(crate) fn shim_history_w_op_wstr(
+        h: *mut HistoryW,
+        ev: *mut HistEventW,
+        op: i32,
+        s: *const wchar_t,
+    ) -> i32;
+    pub(crate) fn shim_history_w_op_str(
+        h: *mut HistoryW,
+        ev: *mut HistEventW,
+        op: i32,
+        s: *const c_char,
     ) -> i32;
 }
 
@@ -92,15 +103,16 @@ pub(crate) unsafe fn el_set_editor(el: *mut EditLine, name: *const c_char) -> i3
     unsafe { shim_el_set(el, EL_EDITOR as i32, name as usize) }
 }
 
-/// Register the prompt trampoline `f` in ESC-aware mode, so bytes enclosed in
-/// `delim` are ignored when computing the prompt's visible width.
-pub(crate) unsafe fn el_set_prompt_esc_fn(el: *mut EditLine, f: PromptFn, delim: c_char) -> i32 {
-    unsafe { shim_el_set_prompt_esc_fn(el, f, delim) }
+/// Register the prompt trampoline `f` in ESC-aware mode via `el_wset`,
+/// so bytes enclosed in `delim` are ignored when computing the prompt's
+/// visible width. The callback returns a `wchar_t*`.
+pub(crate) unsafe fn el_set_prompt_esc_fn(el: *mut EditLine, f: PromptFn, delim: wchar_t) -> i32 {
+    unsafe { shim_el_wset_prompt_esc_fn(el, f, delim) }
 }
 
-/// Register the right-prompt (hint) trampoline `f` in ESC-aware mode.
-pub(crate) unsafe fn el_set_rprompt_esc_fn(el: *mut EditLine, f: PromptFn, delim: c_char) -> i32 {
-    unsafe { shim_el_set_rprompt_esc_fn(el, f, delim) }
+/// Register the right-prompt trampoline `f` in ESC-aware mode via `el_wset`.
+pub(crate) unsafe fn el_set_rprompt_esc_fn(el: *mut EditLine, f: PromptFn, delim: wchar_t) -> i32 {
+    unsafe { shim_el_wset_rprompt_esc_fn(el, f, delim) }
 }
 
 /// Override libedit's get-character function via `EL_GETCFN`. The Rust side
@@ -116,12 +128,12 @@ pub(crate) unsafe fn el_set_getcfn(el: *mut EditLine, f: GetcFn) -> i32 {
 /// distinguish a signal-interrupted read (`errno == EINTR`) from a genuine
 /// end-of-file. Returns the raw line pointer; `count` and `err` are written
 /// with libedit's returned char count and the captured errno respectively.
-pub(crate) unsafe fn el_gets_err(
+pub(crate) unsafe fn el_wgets_err(
     el: *mut EditLine,
     count: *mut i32,
     err: *mut i32,
-) -> *const c_char {
-    unsafe { shim_el_gets(el, count, err) }
+) -> *const wchar_t {
+    unsafe { shim_el_wgets(el, count, err) }
 }
 
 /// Register editor function `name` backed by trampoline `f`, then bind `key`
@@ -152,58 +164,76 @@ pub(crate) unsafe fn el_bind(el: *mut EditLine, key: &CStr, fnname: &CStr) -> i3
     unsafe { shim_el_bind(el, key.as_ptr(), fnname.as_ptr()) }
 }
 
-pub(crate) unsafe fn el_set_hist(el: *mut EditLine, h: *mut History) -> i32 {
-    unsafe { shim_el_set_hist(el, h) }
+pub(crate) unsafe fn el_wset_hist(el: *mut EditLine, h: *mut HistoryW) -> i32 {
+    unsafe { shim_el_wset_hist(el, h) }
 }
 
-// -- History helpers --
+// -- History helpers (wide / HistoryW API) --
 
-pub(crate) unsafe fn history_setsize(h: *mut History, n: i32) {
-    let mut ev = HistEvent {
-        num: 0,
-        str_: ptr::null(),
-    };
-    unsafe { shim_history_setsize(h, &mut ev, n) };
-}
-
-pub(crate) unsafe fn history_setunique(h: *mut History, unique: bool) {
-    let mut ev = HistEvent {
-        num: 0,
-        str_: ptr::null(),
-    };
-    unsafe { shim_history_setunique(h, &mut ev, unique as i32) };
-}
-
-pub(crate) unsafe fn history_enter(h: *mut History, s: &CStr) -> bool {
-    let mut ev = HistEvent {
-        num: 0,
-        str_: ptr::null(),
-    };
-    unsafe { shim_history_enter(h, &mut ev, s.as_ptr()) >= 0 }
-}
-
-pub(crate) unsafe fn history_first(h: *mut History) -> Option<String> {
-    let mut ev = HistEvent {
-        num: 0,
-        str_: ptr::null(),
-    };
-    let ret = unsafe { shim_history_first(h, &mut ev) };
+/// Helper: call a no-arg history op and return the event if successful.
+unsafe fn history_op(h: *mut HistoryW, op: i32) -> Option<HistEventW> {
+    let mut ev = HistEventW::default();
+    let ret = unsafe { shim_history_w_op(h, &mut ev, op) };
     if ret < 0 || ev.str_.is_null() {
-        return None;
+        None
+    } else {
+        Some(ev)
     }
-    Some(
-        unsafe { CStr::from_ptr(ev.str_) }
-            .to_string_lossy()
-            .into_owned(),
-    )
 }
 
-pub(crate) unsafe fn history_len(h: *mut History) -> usize {
-    let mut ev = HistEvent {
-        num: 0,
-        str_: ptr::null(),
-    };
-    let ret = unsafe { shim_history_getsize(h, &mut ev) };
+/// Helper: call an int-arg history op and return the event if successful.
+unsafe fn history_op_int(h: *mut HistoryW, op: i32, arg: i32) -> Option<HistEventW> {
+    let mut ev = HistEventW::default();
+    let ret = unsafe { shim_history_w_op_int(h, &mut ev, op, arg) };
+    if ret < 0 || ev.str_.is_null() {
+        None
+    } else {
+        Some(ev)
+    }
+}
+
+pub(crate) unsafe fn history_w_setsize(h: *mut HistoryW, n: i32) {
+    let mut ev = HistEventW::default();
+    unsafe { shim_history_w_op_int(h, &mut ev, H_SETSIZE as i32, n) };
+}
+
+pub(crate) unsafe fn history_w_setunique(h: *mut HistoryW, unique: bool) {
+    let mut ev = HistEventW::default();
+    unsafe { shim_history_w_op_int(h, &mut ev, H_SETUNIQUE as i32, unique as i32) };
+}
+
+/// Add an entry via `H_ENTER`. Returns:
+/// - `1` if a new entry was inserted
+/// - `0` if the entry was suppressed by unique mode (duplicate)
+/// - `-1` on allocation failure
+pub(crate) unsafe fn history_w_enter(h: *mut HistoryW, s: *const wchar_t) -> i32 {
+    let mut ev = HistEventW::default();
+    unsafe { shim_history_w_op_wstr(h, &mut ev, H_ENTER as i32, s) }
+}
+
+pub(crate) unsafe fn history_w_first(h: *mut HistoryW) -> Option<HistEventW> {
+    unsafe { history_op(h, H_FIRST as i32) }
+}
+
+pub(crate) unsafe fn history_w_last(h: *mut HistoryW) -> Option<HistEventW> {
+    unsafe { history_op(h, H_LAST as i32) }
+}
+
+pub(crate) unsafe fn history_w_next(h: *mut HistoryW) -> Option<HistEventW> {
+    unsafe { history_op(h, H_NEXT as i32) }
+}
+
+pub(crate) unsafe fn history_w_prev(h: *mut HistoryW) -> Option<HistEventW> {
+    unsafe { history_op(h, H_PREV as i32) }
+}
+
+pub(crate) unsafe fn history_w_curr(h: *mut HistoryW) -> Option<HistEventW> {
+    unsafe { history_op(h, H_CURR as i32) }
+}
+
+pub(crate) unsafe fn history_w_len(h: *mut HistoryW) -> usize {
+    let mut ev = HistEventW::default();
+    let ret = unsafe { shim_history_w_op(h, &mut ev, H_GETSIZE as i32) };
     if ret < 0 {
         0
     } else {
@@ -211,26 +241,25 @@ pub(crate) unsafe fn history_len(h: *mut History) -> usize {
     }
 }
 
-pub(crate) unsafe fn history_clear_all(h: *mut History) {
-    let mut ev = HistEvent {
-        num: 0,
-        str_: ptr::null(),
-    };
-    unsafe { shim_history_clear(h, &mut ev) };
+pub(crate) unsafe fn history_w_clear_all(h: *mut HistoryW) {
+    let mut ev = HistEventW::default();
+    unsafe { shim_history_w_op(h, &mut ev, H_CLEAR as i32) };
 }
 
-pub(crate) unsafe fn history_load(h: *mut History, path: &CStr) -> i32 {
-    let mut ev = HistEvent {
-        num: 0,
-        str_: ptr::null(),
-    };
-    unsafe { shim_history_load(h, &mut ev, path.as_ptr()) }
+pub(crate) unsafe fn history_w_load(h: *mut HistoryW, path: &CStr) -> i32 {
+    let mut ev = HistEventW::default();
+    unsafe { shim_history_w_op_str(h, &mut ev, H_LOAD as i32, path.as_ptr()) }
 }
 
-pub(crate) unsafe fn history_save(h: *mut History, path: &CStr) -> i32 {
-    let mut ev = HistEvent {
-        num: 0,
-        str_: ptr::null(),
-    };
-    unsafe { shim_history_save(h, &mut ev, path.as_ptr()) }
+pub(crate) unsafe fn history_w_save(h: *mut HistoryW, path: &CStr) -> i32 {
+    let mut ev = HistEventW::default();
+    unsafe { shim_history_w_op_str(h, &mut ev, H_SAVE as i32, path.as_ptr()) }
+}
+
+pub(crate) unsafe fn history_w_next_event(h: *mut HistoryW, num: i32) -> Option<HistEventW> {
+    unsafe { history_op_int(h, H_NEXT_EVENT as i32, num) }
+}
+
+pub(crate) unsafe fn history_w_prev_event(h: *mut HistoryW, num: i32) -> Option<HistEventW> {
+    unsafe { history_op_int(h, H_PREV_EVENT as i32, num) }
 }

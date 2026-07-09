@@ -12,8 +12,9 @@
 //! use libedit::EditLine;
 //!
 //! let mut el = EditLine::new("example").unwrap();
-//! if let Some(line) = el.readline("prompt> ").unwrap() {
-//!     println!("got: {line}");
+//! match el.readline("prompt> ") {
+//!     Ok(line) => println!("got: {line}"),
+//!     Err(e) => eprintln!("error: {e}"),
 //! }
 //! ```
 //!
@@ -26,23 +27,23 @@
 
 #![deny(missing_docs)]
 
-pub mod completion;
+// libedit is a POSIX library. This crate would need significant rework
+// (Windows console APIs, etc.) to support anything else.
+#[cfg(not(unix))]
+compile_error!("libedit only supports Unix targets");
+
 pub mod editline;
 pub mod error;
-pub mod hint;
 pub mod history;
-pub mod suggestion;
 pub mod term;
 pub mod tokenizer;
 
 mod shim;
+pub(crate) mod wstr;
 
-pub use completion::{longest_common_prefix, CandidateStyler, Completer, Completion, LineContext};
-pub use editline::{Action, ActionContext, EditLine, Editor, Writer};
+pub use editline::{Action, EditLine, Editor, EventHandler, LineContext, OutWriter};
 pub use error::{Error, Result};
-pub use hint::{Hint, Hinter};
 pub use history::{History, DEFAULT_HISTORY_SIZE};
-pub use suggestion::{Suggester, Suggestion};
 pub use tokenizer::Tokenizer;
 
 /// Re-exported libedit `EL_*` / `H_*` operation constants for use with the

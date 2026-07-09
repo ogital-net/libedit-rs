@@ -9,25 +9,20 @@
 //! Features demonstrated:
 //! - Reading lines with a colored prompt (`EditLine::readline`)
 //! - Command history with up/down recall, dedup, and persistence
-//! - Tab completion of commands (`EditLine::set_completer`)
-//! - Fish-style inline ghost-text suggestions (`EditLine::set_suggester`)
-//! - Styled ambiguous-candidate listing (`EditLine::set_candidate_styler`)
-//! - Right-margin help text (`EditLine::set_hinter`)
-//! - Juniper-style `?` context help via `add_action` + `bind_key`
+//! - Tab completion of commands (`EditLine::set_complete_handler`)
+//! - Juniper-style `?` context help (`EditLine::set_help_handler`)
 //! - Ctrl-C / Ctrl-D distinction (`Error::Interrupted` vs EOF)
 //! - Signal handling for terminal resize (`set_signal_handling`)
+//! - Bracketed paste (on by default): pasted text -- even with newlines or
+//!   Tabs -- is inserted literally instead of triggering completion/submit.
+//!   Try pasting `echo one two three` or a multi-line snippet.
 //! - Unified error handling via `libedit::Result`
 //!
-//! Built-in commands: `show`, `set`, `help`, `history`, `clear`, `quit`.
+//! Built-in commands: `echo`, `show`, `set`, `help`, `history`, `clear`, `quit`.
 
-use libedit::hint::Hint;
-use libedit::suggestion::Suggestion;
+use libedit::editline::Hinter;
 use libedit::term::supports_color;
-use libedit::{
-    Action, ActionContext, Completer, Completion, EditLine, Error, History, LineContext, Result,
-    Tokenizer,
-};
-use std::io::Write;
+use libedit::{Action, EditLine, Error, EventHandler, History, LineContext, Result, Tokenizer};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -38,6 +33,7 @@ use std::path::PathBuf;
 /// this would be a hierarchical prefix trie (e.g. the `command-trie` crate)
 /// with sub-commands, argument specs, etc.
 const COMMANDS: &[(&str, &str)] = &[
+    ("echo", "print the rest of the line (try pasting into it)"),
     ("show", "display operational state"),
     ("set", "configure a parameter"),
     ("help", "show available commands"),
@@ -52,25 +48,133 @@ const COMMANDS: &[(&str, &str)] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Completer
+// Word helper
+// ---------------------------------------------------------------------------
+
+/// Extract the word under the cursor (everything from the last whitespace
+/// before the cursor to the cursor position).
+fn word_at_cursor(line: &str, cursor: usize) -> &str {
+    let before = &line[..cursor];
+    let start = before.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    &before[start..]
+}
+
+// ---------------------------------------------------------------------------
+// Completion handler
 // ---------------------------------------------------------------------------
 
 /// Tab-completes the first token against the command table.
 struct CommandCompleter;
 
-impl Completer for CommandCompleter {
-    fn complete(&mut self, ctx: &LineContext) -> Completion {
+impl EventHandler for CommandCompleter {
+    fn handle(
+        &self,
+        ctx: &mut LineContext,
+        insert_writer: &mut dyn std::fmt::Write,
+        output_writer: &mut dyn std::io::Write,
+    ) -> Action {
+        let word = word_at_cursor(ctx.line(), ctx.cursor());
+
         // Only complete the command word (before the first space).
         if ctx.line()[..ctx.cursor()].contains(char::is_whitespace) {
-            return Completion::none();
+            return Action::Norm;
         }
-        let word = ctx.word();
-        let matches: Vec<String> = COMMANDS
+
+        let matches: Vec<&str> = COMMANDS
             .iter()
             .filter(|(name, _)| name.starts_with(word))
-            .map(|(name, _)| name.to_string())
+            .map(|(name, _)| *name)
             .collect();
-        Completion::new(matches)
+
+        match matches.len() {
+            0 => Action::RefreshBeep,
+            1 => {
+                // Single match — insert the remaining suffix plus a trailing space.
+                let suffix = &matches[0][word.len()..];
+                if write!(insert_writer, "{suffix} ").is_err() {
+                    return Action::Error;
+                }
+                Action::Refresh
+            }
+            _ => {
+                // Multiple matches — list them and redisplay.
+                let _ = writeln!(output_writer);
+                let max_name = matches.iter().map(|n| n.len()).max().unwrap_or(0);
+                for name in &matches {
+                    let _ = write!(
+                        output_writer,
+                        "  \x1b[1;36m{:<width$}\x1b[0m",
+                        name,
+                        width = max_name
+                    );
+                }
+                let _ = writeln!(output_writer);
+                let _ = output_writer.flush();
+                Action::Redisplay
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Help handler
+// ---------------------------------------------------------------------------
+
+/// Prints Juniper-style context help for `?`.
+struct HelpHandler;
+
+impl EventHandler for HelpHandler {
+    fn handle(
+        &self,
+        ctx: &mut LineContext,
+        _insert_writer: &mut dyn std::fmt::Write,
+        output_writer: &mut dyn std::io::Write,
+    ) -> Action {
+        let word = word_at_cursor(ctx.line(), ctx.cursor());
+        let matches: Vec<_> = COMMANDS
+            .iter()
+            .filter(|(name, _)| name.starts_with(word))
+            .collect();
+
+        if matches.is_empty() {
+            let _ = writeln!(output_writer, "\n  (no completions)");
+        } else {
+            let _ = writeln!(output_writer, "\nPossible completions:");
+            let max_name = matches.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+            for (name, desc) in &matches {
+                let _ = writeln!(
+                    output_writer,
+                    "  \x1b[1;36m{:<width$}\x1b[0m  {desc}",
+                    name,
+                    width = max_name
+                );
+            }
+        }
+        let _ = output_writer.flush();
+        Action::Redisplay
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hinter
+// ---------------------------------------------------------------------------
+struct CommandHinter;
+
+impl Hinter for CommandHinter {
+    fn hint(&self, line_ctx: &mut LineContext, writer: &mut dyn std::fmt::Write) {
+        let line = line_ctx.line();
+        let mut iter = COMMANDS
+            .iter()
+            .filter(|(name, _)| name.starts_with(line) && name.len() > line.len());
+        let name = match iter.next() {
+            Some((name, _)) => *name,
+            None => return,
+        };
+        if iter.next().is_some() {
+            // ambiguous
+            return;
+        }
+        let _ = writer.write_str(&name[line.len()..]);
     }
 }
 
@@ -85,59 +189,6 @@ fn history_path() -> PathBuf {
     p
 }
 
-/// No-op SIGINT handler.
-///
-/// libedit's signal handling (enabled via [`EditLine::set_signal_handling`])
-/// traps SIGINT during `readline`, restores whatever handler was installed
-/// beforehand, and re-raises the signal. If that prior disposition is the
-/// default (`SIG_DFL`), the re-raised SIGINT *terminates the process* before
-/// `readline` can return -- so Ctrl-C would kill the REPL with no output.
-///
-/// Installing this non-terminating handler prevents that: the re-raised signal
-/// runs this no-op, the interrupted read surfaces as `EINTR`, and `readline`
-/// returns [`Error::Interrupted`] so the loop below can print `^C` and carry
-/// on. It is registered *without* `SA_RESTART` (see `install_sigint_handler`)
-/// so the read is not silently restarted.
-extern "C" fn on_sigint(_signo: libc::c_int) {}
-
-/// Install [`on_sigint`] for SIGINT with no `SA_RESTART`, so a Ctrl-C during
-/// `readline` is reported as [`Error::Interrupted`] rather than killing the
-/// process.
-fn install_sigint_handler() {
-    // SAFETY: `on_sigint` is async-signal-safe (it does nothing). We zero a
-    // `sigaction`, point it at the handler with `sa_flags == 0` (crucially no
-    // SA_RESTART, so the interrupted read yields EINTR), and install it.
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = on_sigint as *const () as libc::sighandler_t;
-        libc::sigemptyset(&mut sa.sa_mask);
-        sa.sa_flags = 0;
-        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-    }
-}
-
-/// Print the commands matching `prefix` in Juniper-style aligned columns.
-fn print_context_help(out: &mut impl Write, prefix: &str) {
-    let matches: Vec<_> = COMMANDS
-        .iter()
-        .filter(|(name, _)| name.starts_with(prefix))
-        .collect();
-    if matches.is_empty() {
-        let _ = writeln!(out, "\n  (no completions)");
-        return;
-    }
-    let _ = writeln!(out, "\nPossible completions:");
-    let max_name = matches.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
-    for (name, desc) in &matches {
-        let _ = writeln!(
-            out,
-            "  \x1b[1;36m{:<width$}\x1b[0m  {desc}",
-            name,
-            width = max_name
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -145,94 +196,32 @@ fn print_context_help(out: &mut impl Write, prefix: &str) {
 fn main() -> Result<()> {
     let mut editor = EditLine::new_with_locale("cli")?;
     editor.set_editor(libedit::Editor::Emacs)?;
-    let mut history = History::with_size(1000);
     let mut tokenizer = Tokenizer::new(None)?;
     let color = supports_color();
 
-    // -- History --
-    history.set_unique(true);
-    let hist_path = history_path();
-    let _ = history.load(&hist_path);
-    editor.set_history(&mut history)?;
-
-    // -- Tab completion --
-    editor.set_completer(CommandCompleter)?;
-    if color {
-        editor.set_candidate_styler(|cand: &str, out: &mut String| {
-            use std::fmt::Write as _;
-            let _ = write!(out, "\x1b[1;36m{cand}\x1b[0m");
-        });
-    }
-
-    // -- Inline ghost-text suggestion (fish-style) --
-    // Only enable when the terminal supports color -- without faint/dim styling
-    // the ghost text is indistinguishable from real input.
-    if color {
-        editor.set_suggester(|ctx: &LineContext| {
-            let line = ctx.line();
-            if line.is_empty() {
-                return None;
-            }
-            let mut iter = COMMANDS
-                .iter()
-                .filter(|(name, _)| name.starts_with(line) && name.len() > line.len());
-            let (name, _) = iter.next()?;
-            if iter.next().is_some() {
-                return None;
-            }
-            Some(Suggestion::new(&name[line.len()..]))
-        })?;
-        editor.set_suggestion_style("\x1b[2m", "\x1b[0m");
-    }
-
-    // -- Right-margin hint (command description) --
-    editor.set_hinter(|ctx: &LineContext| {
-        // After Tab completion adds a trailing space, `word()` is empty -- fall
-        // back to the first token of the line so the hint persists.
-        let lookup = if ctx.word().is_empty() {
-            ctx.line().split_ascii_whitespace().next().unwrap_or("")
-        } else {
-            ctx.word()
-        };
-        if lookup.is_empty() {
-            return None;
-        }
-        let mut iter = COMMANDS.iter().filter(|(name, _)| name.starts_with(lookup));
-        let first = iter.next()?;
-        if iter.next().is_some() {
-            return None;
-        }
-        Some(Hint::new(format!("-- {}", first.1)))
-    });
-
-    // -- Juniper-style '?' context help --
-    let help_action = editor.add_action("context-help", |ctx: &ActionContext| {
-        let mut out = ctx.output();
-        print_context_help(&mut out, ctx.word());
-        out.flush().unwrap();
-        Action::Redisplay
-    })?;
-    editor.bind_key("?", &help_action)?;
+    // -- Completion and help handlers --
+    editor.set_complete_handler(CommandCompleter)?;
+    editor.set_help_handler(HelpHandler)?;
+    editor.set_hinter(CommandHinter)?;
 
     // -- Editor settings --
-    // Enable libedit's signal handling (SIGWINCH resize, etc.). On its own
-    // this is not enough to make Ctrl-C recoverable: libedit re-raises the
-    // trapped SIGINT against the previously-installed disposition, which
-    // defaults to "terminate". Installing a non-terminating handler first lets
-    // `readline` return `Error::Interrupted` instead of the process being
-    // killed. See `install_sigint_handler`.
-    install_sigint_handler();
+    let mut history = History::with_size(1000);
+    let _ = history.load(history_path());
     editor.set_signal_handling(true)?;
+    editor.set_auto_add_history(true);
+    editor.set_history_ignore_space(true);
+    editor.set_history(history);
 
     // -- Banner --
     if color {
         println!(
             "\x1b[1;36mcli\x1b[0m -- type \x1b[1m?\x1b[0m for help, Tab to complete, Ctrl-D to exit"
         );
+        println!("      paste is bracketed -- try pasting \x1b[1mecho hello world\x1b[0m");
     } else {
         println!("cli -- type ? for help, Tab to complete, Ctrl-D to exit");
+        println!("      paste is bracketed -- try pasting `echo hello world`");
     }
-    println!("(ghost text suggests -- accept with Ctrl-F or ->)\n");
 
     // -- REPL loop --
     let prompt = if color {
@@ -241,37 +230,24 @@ fn main() -> Result<()> {
         "cli> "
     };
     loop {
-        let mut line = match editor.readline(prompt) {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
+        let line = match editor.readline(prompt) {
+            Ok(line) => line,
+            Err(Error::Eof) => {
+                println!();
+                break;
+            }
             Err(Error::Interrupted) => {
                 println!("^C");
                 continue;
             }
             Err(e) => return Err(e),
         };
-
-        // Trim without allocating where possible. `truncate` drops trailing
-        // whitespace in place (the inner `&line` borrow resolves to a `Copy`
-        // usize before the `&mut` truncate). `start` is the count of leading
-        // whitespace bytes; when it is 0 the buffer is already fully trimmed
-        // and can be *moved* into the tokenizer, avoiding a copy entirely.
-        line.truncate(line.trim_end().len());
-        let start = line.len() - line.trim_start().len();
-        if line.len() == start {
+        if line.is_empty() {
             continue; // empty or whitespace-only
         }
 
-        history.add(&line[start..])?;
         tokenizer.reset();
-        // `words` borrow the tokenizer, not `line`, so moving `line` in is
-        // fine. No leading whitespace -> move (zero-copy); otherwise pass the
-        // borrowed slice, which `tokenize` copies into its `CString`.
-        let words = if start == 0 {
-            tokenizer.tokenize(line)?
-        } else {
-            tokenizer.tokenize(&line[start..])?
-        };
+        let words = tokenizer.tokenize(line)?;
 
         match words.first().copied() {
             Some("quit") | Some("exit") => break,
@@ -282,20 +258,43 @@ fn main() -> Result<()> {
                 }
             }
             Some("history") => {
-                if history.is_empty() {
-                    println!("(no history)");
-                } else {
-                    println!("{} entries", history.len());
-                    if let Ok(latest) = history.first() {
-                        println!("most recent: {latest}");
+                match editor.history_mut() {
+                    None => println!("(no history)"),
+                    Some(hist) if hist.is_empty() => println!("(no history)"),
+                    Some(hist) => {
+                        let total = hist.len();
+                        let show = total.min(10);
+                        println!("{} entries (showing last {show}):", total);
+
+                        // Rewind and print oldest -> newest
+                        let _ = hist.newest();
+                        let _ = hist.older_n(show.saturating_sub(1));
+                        if let Some(e) = hist.curr() {
+                            println!("{:4}  {}", e.num, e.value);
+                        }
+                        let mut count = 1;
+                        while let Some(e) = hist.newer() {
+                            println!("{:4}  {}", e.num, e.value);
+                            count += 1;
+                            if count >= show {
+                                break;
+                            }
+                        }
                     }
                 }
             }
             Some("clear") => {
-                history.clear();
-                println!("history cleared");
+                if let Some(hist) = editor.history_mut() {
+                    hist.clear();
+                    println!("history cleared");
+                }
             }
             Some("caf\u{00e9}") => println!("(caf\u{00e9}: not implemented in this demo)"),
+            Some("echo") => {
+                // Echo the remaining tokens -- handy for seeing exactly what a
+                // paste inserted into the line.
+                println!("{}", words[1..].join(" "));
+            }
             Some("show") => println!("(show: not implemented in this demo)"),
             Some("set") => println!("(set: not implemented in this demo)"),
             Some(cmd) => {
@@ -305,9 +304,10 @@ fn main() -> Result<()> {
         }
     }
 
-    if let Err(e) = history.save(&hist_path) {
-        eprintln!("warning: could not save history: {e}");
+    if let Some(hist) = editor.history_mut() {
+        let _ = hist.save(history_path());
     }
+
     println!("bye!");
     Ok(())
 }

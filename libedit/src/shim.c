@@ -10,9 +10,9 @@
 // EL_SIGNAL is enabled). The two are only distinguishable by errno: a signal
 // leaves errno == EINTR. We snapshot errno immediately after the call so the
 // Rust side can tell an interrupt apart from EOF.
-const char *shim_el_gets(EditLine *el, int *count, int *err) {
+const wchar_t *shim_el_wgets(EditLine *el, int *count, int *err) {
     errno = 0;
-    const char *line = el_gets(el, count);
+    const wchar_t *line = el_wgets(el, count);
     *err = errno;
     return line;
 }
@@ -32,26 +32,13 @@ int shim_el_set_clientdata(EditLine *el, void *data) {
     return el_set(el, EL_CLIENTDATA, data);
 }
 
-// Prompt callbacks. libedit's prompt ops expect a function pointer of type
-// `char *(*)(EditLine *)`, NOT a string. Passing a string makes libedit call
-// into the string's bytes as code -> segfault. The Rust side supplies a
-// trampoline that returns the current prompt from client data.
-//
-// We use the ESC-aware ops (EL_PROMPT_ESC / EL_RPROMPT_ESC). The extra
-// `delim` character marks "literal" (non-printing) regions: libedit ignores
-// any bytes enclosed between two `delim` characters when computing the
-// prompt's visible width. This lets the prompt/hint embed ANSI color escapes
-// without corrupting cursor math. Same mechanism as readline's
-// RL_PROMPT_START_IGNORE / RL_PROMPT_END_IGNORE.
-typedef char *(*shim_prompt_fn)(EditLine *);
-int shim_el_set_prompt_esc_fn(EditLine *el, shim_prompt_fn fn, char delim) {
-    // Use el_wset (wide API) so p_wide=1 -- the trampoline returns wchar_t*
-    // directly. This avoids ct_decode_string/mbstowcs and the locale
-    // dependency that causes crashes with non-ASCII text in the C locale.
-    return el_wset(el, EL_PROMPT_ESC, fn, (wchar_t)delim);
+// Prompt callbacks. el_wset expects el_pfunc_t = wchar_t *(*)(EditLine *).
+typedef wchar_t *(*shim_prompt_fn)(EditLine *);
+int shim_el_wset_prompt_esc_fn(EditLine *el, shim_prompt_fn fn, wchar_t delim) {
+    return el_wset(el, EL_PROMPT_ESC, fn, delim);
 }
-int shim_el_set_rprompt_esc_fn(EditLine *el, shim_prompt_fn fn, char delim) {
-    return el_wset(el, EL_RPROMPT_ESC, fn, (wchar_t)delim);
+int shim_el_wset_rprompt_esc_fn(EditLine *el, shim_prompt_fn fn, wchar_t delim) {
+    return el_wset(el, EL_RPROMPT_ESC, fn, delim);
 }
 
 // Register a named editor function (EL_ADDFN) backed by a Rust trampoline of
@@ -68,50 +55,52 @@ int shim_el_bind(EditLine *el, const char *key, const char *fnname) {
 // Override libedit's get-character function (EL_GETCFN). The callback has
 // signature `int (*)(EditLine *, wchar_t *)` (el_rfunc_t). libedit uses wide
 // characters internally.
+//
+// We call el_wset directly (not el_set) to avoid the narrow-API wrapper
+// (eln.c) which sets the NARROW_READ flag. That flag causes el_wgetc to
+// truncate the wchar_t back to (signed) char after our trampoline returns,
+// mangling any non-ASCII codepoint (e.g. U+00BF → U+FFBF).
 typedef int (*shim_getcfn)(EditLine *, wchar_t *);
 int shim_el_set_getcfn(EditLine *el, shim_getcfn fn) {
-    return el_set(el, EL_GETCFN, fn);
+    return el_wset(el, EL_GETCFN, fn);
 }
 
-// Wire an EditLine to a History instance: el_set(el, EL_HIST, history, h).
-// The variadic `history` function pointer must be passed exactly as libedit
-// expects, so this is done in C to avoid Rust variadic UB.
-int shim_el_set_hist(EditLine *el, History *h) {
-    return el_set(el, EL_HIST, history, h);
+// Wire an EditLine to a HistoryW instance: el_wset(el, EL_HIST, history_w, h).
+// Uses the wide history API so libedit does NOT set NARROW_HISTORY,
+// eliminating a narrow<->wide conversion on every history lookup.
+int shim_el_wset_hist(EditLine *el, HistoryW *h) {
+    return el_wset(el, EL_HIST, history_w, h);
 }
 
-// -- History shims --
-
-int shim_history_enter(History *h, HistEvent *ev, const char *s) {
-    return history(h, ev, H_ENTER, s);
+// Retrieve the FILE* for fd 0 (input), 1 (output), or 2 (error) via
+// EL_GETFP. Returns 0 on success, -1 on error. The libedit call is
+// variadic, so the wrapper lives here in C.
+int shim_el_getfp(EditLine *el, int fd, FILE **fp) {
+    return el_get(el, EL_GETFP, fd, fp);
 }
 
-int shim_history_first(History *h, HistEvent *ev) {
-    return history(h, ev, H_FIRST);
+// -- History shims (wide / HistoryW API) --
+
+// Operations with no extra argument:
+// H_FIRST, H_LAST, H_NEXT, H_PREV, H_CURR, H_GETSIZE, H_CLEAR
+int shim_history_w_op(HistoryW *h, HistEventW *ev, int op) {
+    return history_w(h, ev, op);
 }
 
-int shim_history_getsize(History *h, HistEvent *ev) {
-    return history(h, ev, H_GETSIZE);
+// Operations with one int argument:
+// H_SETSIZE, H_SETUNIQUE, H_NEXT_EVENT, H_PREV_EVENT
+int shim_history_w_op_int(HistoryW *h, HistEventW *ev, int op, int arg) {
+    return history_w(h, ev, op, arg);
 }
 
-int shim_history_setsize(History *h, HistEvent *ev, int n) {
-    return history(h, ev, H_SETSIZE, n);
+// Operations with one wide-string argument:
+// H_ENTER
+int shim_history_w_op_wstr(HistoryW *h, HistEventW *ev, int op, const wchar_t *s) {
+    return history_w(h, ev, op, s);
 }
 
-// Toggle "unique" mode. When enabled, entering a line identical to the most
-// recent entry is a no-op, so consecutive duplicates aren't stored.
-int shim_history_setunique(History *h, HistEvent *ev, int unique) {
-    return history(h, ev, H_SETUNIQUE, unique);
-}
-
-int shim_history_clear(History *h, HistEvent *ev) {
-    return history(h, ev, H_CLEAR);
-}
-
-int shim_history_load(History *h, HistEvent *ev, const char *path) {
-    return history(h, ev, H_LOAD, path);
-}
-
-int shim_history_save(History *h, HistEvent *ev, const char *path) {
-    return history(h, ev, H_SAVE, path);
+// Operations with one narrow-string argument:
+// H_LOAD, H_SAVE
+int shim_history_w_op_str(HistoryW *h, HistEventW *ev, int op, const char *s) {
+    return history_w(h, ev, op, s);
 }

@@ -122,13 +122,13 @@ impl Tokenizer {
             let word = unsafe { CStr::from_ptr(*argv.offset(i as isize)) };
             // INVARIANT (see `# Panics`): input was a `String` and separators
             // are ASCII, so no token can be split mid-character; every token
-            // is valid UTF-8. `expect` documents this so a future regression
-            // (e.g. a wide-tokenizer path) fails loudly at the source.
-            words.push(
-                word.to_str().expect(
-                    "tokenizer produced non-UTF-8 despite String input and ASCII separators",
-                ),
-            );
+            // is valid UTF-8.
+            //
+            // SAFETY: `word` is a token produced by libedit's byte-wise
+            // tokenizer from a valid UTF-8 input with ASCII-only separators.
+            // Removing ASCII bytes cannot break a multi-byte UTF-8 sequence,
+            // so every token remains valid UTF-8.
+            words.push(unsafe { std::str::from_utf8_unchecked(word.to_bytes()) });
         }
 
         Ok(words)

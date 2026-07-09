@@ -1,8 +1,10 @@
 //! Unified error handling for the `libedit` crate.
 
-use std::ffi::NulError;
+use std::ffi::{CString, NulError};
 use std::fmt;
 use std::io;
+
+use crate::wstr::WNulError;
 
 /// The error type for all `libedit` operations.
 ///
@@ -46,10 +48,12 @@ pub enum Error {
     /// Only produced when signal handling is enabled via
     /// [`EditLine::set_signal_handling`](crate::EditLine::set_signal_handling).
     /// A typical REPL treats this as "abandon the current line and show a
-    /// fresh prompt", distinct from the end-of-file that Ctrl-D produces
-    /// (which surfaces as `Ok(None)` from
-    /// [`readline`](crate::EditLine::readline)).
+    /// fresh prompt".
     Interrupted,
+
+    /// End-of-file was received (e.g. the user pressed Ctrl-D on an empty
+    /// line).
+    Eof,
 }
 
 impl Error {
@@ -71,6 +75,7 @@ impl fmt::Display for Error {
             }
             Error::NotFound => write!(f, "history entry not found"),
             Error::Interrupted => write!(f, "read interrupted by signal"),
+            Error::Eof => write!(f, "end of file"),
         }
     }
 }
@@ -94,6 +99,18 @@ impl From<io::Error> for Error {
 impl From<NulError> for Error {
     fn from(e: NulError) -> Self {
         Error::Nul(e)
+    }
+}
+
+impl From<WNulError> for Error {
+    fn from(e: WNulError) -> Self {
+        // Convert a WNulError (wide-string interior NUL) to Error::Nul.
+        // NulError has no public constructor, so we feed a Vec<u8> with an
+        // interior NUL to CString::new and unwrap the error.
+        let pos = e.nul_position();
+        let mut bytes = vec![b'x'; pos + 2];
+        bytes[pos] = 0; // interior NUL at position `pos`
+        Error::Nul(CString::new(bytes).unwrap_err())
     }
 }
 
