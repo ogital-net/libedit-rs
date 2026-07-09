@@ -300,13 +300,12 @@ impl EditLine {
         // SAFETY: `self.context` was created in `new` via `Box::into_raw` and
         // is only mutated here and freed in `Drop`; no other reference to it
         // is live at this point.
-        let wrapped = wrap_ansi_escapes(prompt.as_ref());
         // Precompute the prompt's visible column width for the suggestion
         // renderer, and reset per-line suggestion state so a leftover width
         // from a previous line can't cause a stray erase.
         let prompt_cols = display_width(prompt.as_ref());
         unsafe {
-            (*self.context).prompt_wide = str_to_wide(&wrapped);
+            (*self.context).prompt_wide = prompt_to_wide(prompt.as_ref());
             (*self.context).prompt_cols = prompt_cols;
             (*self.context).prev_suggest_total = 0;
         }
@@ -961,19 +960,6 @@ impl Drop for EditLine {
     }
 }
 
-/// Convert a Rust `&str` (UTF-8) to a NUL-terminated `Vec<wchar_t>`.
-/// Each Unicode scalar value maps to one `wchar_t` (which is `u32` on Linux).
-/// This is locale-independent -- it does not use `mbstowcs`.
-///
-/// Pre-allocates with `s.len() + 1` (byte length is always >= char count for
-/// UTF-8) so the Vec never reallocates during construction.
-fn str_to_wide(s: &str) -> Vec<wchar_t> {
-    let mut v = Vec::with_capacity(s.len() + 1);
-    v.extend(s.chars().map(|c| c as wchar_t));
-    v.push(0); // NUL terminator
-    v
-}
-
 /// Prompt trampoline registered with libedit's `EL_PROMPT_ESC` via `el_wset`
 /// (wide mode, `p_wide=1`). Returns a `wchar_t*` to the context's wide prompt
 /// buffer -- cast to `*mut c_char` to satisfy the `el_pfunc_t` typedef, but
@@ -1017,7 +1003,7 @@ extern "C" fn rprompt_trampoline(el: *mut libedit_sys::EditLine) -> *mut c_char 
                 // Convert hint text to a wide string (wchar_t array).
                 // Wrap ANSI escapes in the delimiter so libedit's
                 // EL_RPROMPT_ESC width calculation ignores them.
-                ctx.hint_wide = str_to_wide(&wrap_ansi_escapes(h.text()));
+                ctx.hint_wide = prompt_to_wide(h.text());
                 ctx.hint_wide.as_ptr() as *mut c_char
             }
             None => {
@@ -1586,55 +1572,58 @@ fn write_candidates(stream: *mut FILE, listing: &str) {
     }
 }
 
-/// Wrap ANSI escape sequences in `PROMPT_ESC_DELIM` so libedit's ESC-aware
-/// prompt modes exclude them from the computed display width.
-///
-/// A sequence begins at ESC (`0x1b`) and runs through the first byte in the
-/// range `@`..=`~` (`0x40`..=`0x7e`), which terminates a CSI/escape sequence.
-/// Each such sequence is bracketed with the delimiter byte. Text containing no
-/// escapes is returned effectively unchanged (aside from allocation).
-fn wrap_ansi_escapes(s: &str) -> String {
-    // Fast path: nothing to do if there are no escape bytes.
-    if !s.as_bytes().contains(&0x1b) {
-        return s.to_string();
+/// Converts a prompt string directly to a NUL-terminated `Vec<wchar_t>` with
+/// ANSI escape sequences wrapped in `PROMPT_ESC_DELIM`, in a single pass with
+/// one allocation.
+fn prompt_to_wide(s: &str) -> Vec<wchar_t> {
+    let bytes = s.as_bytes();
+    // s.len() (byte count) >= char count for UTF-8. +5 covers the NUL
+    // terminator (+1) plus up to two escape-sequence delimiter pairs (+4),
+    // matching the typical colored-prompt case without reallocation.
+    let mut v: Vec<wchar_t> = Vec::with_capacity(s.len() + 5);
+    if !bytes.contains(&0x1b) {
+        // Fast path: no escapes, just widen each char directly.
+        v.extend(s.chars().map(|c| c as wchar_t));
+        v.push(0);
+        return v;
     }
     #[allow(clippy::unnecessary_cast)]
-    let delim = PROMPT_ESC_DELIM as u8 as char;
-    let mut out = String::with_capacity(s.len() + 4);
-    let bytes = s.as_bytes();
+    let delim = PROMPT_ESC_DELIM as wchar_t;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == 0x1b {
-            // Find the terminator of the escape sequence.
+            // Find the end of the escape sequence (final byte in 0x40..=0x7e).
             let start = i;
             i += 1;
-            // Skip the CSI introducer (`[`, 0x5b) if present, so it isn't
-            // mistaken for the sequence's final byte (which also lies in the
-            // 0x40..=0x7e range). Colored prompts use CSI/SGR sequences.
+            // Skip CSI introducer (`[`) so it isn't mistaken for the final byte.
             if i < bytes.len() && bytes[i] == b'[' {
                 i += 1;
             }
-            // Consume parameter/intermediate bytes up to the final byte, which
-            // is the first byte in the range `@`..=`~` (0x40..=0x7e).
+            // Consume parameter/intermediate bytes up to the final byte.
             while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
                 i += 1;
             }
             if i < bytes.len() {
                 i += 1; // include the terminator byte
             }
-            out.push(delim);
-            // The escape bytes are ASCII, so this slice is valid UTF-8.
-            out.push_str(std::str::from_utf8(&bytes[start..i]).unwrap_or(""));
-            out.push(delim);
+            v.push(delim);
+            // Escape bytes are ASCII, so each byte maps 1:1 to a wchar_t.
+            v.extend(bytes[start..i].iter().map(|&b| b as wchar_t));
+            v.push(delim);
         } else {
-            // Copy one UTF-8 character starting at `i`.
+            // Decode one UTF-8 character and push as wchar_t.
             let ch_len = utf8_char_len(bytes[i]);
             let end = (i + ch_len).min(bytes.len());
-            out.push_str(std::str::from_utf8(&bytes[i..end]).unwrap_or(""));
+            if let Ok(s) = std::str::from_utf8(&bytes[i..end]) {
+                for c in s.chars() {
+                    v.push(c as wchar_t);
+                }
+            }
             i = end;
         }
     }
-    out
+    v.push(0);
+    v
 }
 
 /// Length in bytes of a UTF-8 character given its leading byte.
@@ -1686,7 +1675,18 @@ unsafe fn close_streams(streams: &[*mut FILE; 3]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{display_width, wrap_ansi_escapes, PROMPT_ESC_DELIM};
+    use super::{display_width, prompt_to_wide, PROMPT_ESC_DELIM};
+    use libedit_sys::wchar_t;
+
+    /// Convert a NUL-terminated wide buffer back to a String for readable
+    /// assertions. Each wchar_t is cast to a char (valid for BMP + ASCII).
+    #[allow(clippy::unnecessary_cast)]
+    fn wide_to_string(v: &[wchar_t]) -> String {
+        v.iter()
+            .take_while(|&&w| w != 0)
+            .map(|&w| char::from_u32(w as u32).unwrap_or('\u{FFFD}'))
+            .collect()
+    }
 
     /// The delimiter as a `char` for building expected strings.
     #[allow(clippy::unnecessary_cast)]
@@ -1696,7 +1696,8 @@ mod tests {
 
     #[test]
     fn plain_text_is_unchanged() {
-        assert_eq!(wrap_ansi_escapes("prompt> "), "prompt> ");
+        let wide = prompt_to_wide("prompt> ");
+        assert_eq!(wide_to_string(&wide), "prompt> ");
     }
 
     #[test]
@@ -1732,7 +1733,7 @@ mod tests {
         // "\x1b[32m> " -> the escape is bracketed, the "> " is left alone.
         let input = "\x1b[32m> ";
         let expected = format!("{d}\x1b[32m{d}> ", d = d());
-        assert_eq!(wrap_ansi_escapes(input), expected);
+        assert_eq!(wide_to_string(&prompt_to_wide(input)), expected);
     }
 
     #[test]
@@ -1740,7 +1741,7 @@ mod tests {
         // Bold green "> " with a reset after it.
         let input = "\x1b[1;32m> \x1b[0m";
         let expected = format!("{d}\x1b[1;32m{d}> {d}\x1b[0m{d}", d = d());
-        assert_eq!(wrap_ansi_escapes(input), expected);
+        assert_eq!(wide_to_string(&prompt_to_wide(input)), expected);
     }
 
     #[test]
@@ -1748,7 +1749,7 @@ mod tests {
         // A non-ASCII char adjacent to an escape must not be split.
         let input = "caf\u{00e9} \x1b[0m";
         let expected = format!("caf\u{00e9} {d}\x1b[0m{d}", d = d());
-        assert_eq!(wrap_ansi_escapes(input), expected);
+        assert_eq!(wide_to_string(&prompt_to_wide(input)), expected);
     }
 
     #[test]
@@ -1756,6 +1757,6 @@ mod tests {
         // A lone trailing ESC (malformed) is still bracketed and doesn't panic.
         let input = "x\x1b";
         let expected = format!("x{d}\x1b{d}", d = d());
-        assert_eq!(wrap_ansi_escapes(input), expected);
+        assert_eq!(wide_to_string(&prompt_to_wide(input)), expected);
     }
 }
