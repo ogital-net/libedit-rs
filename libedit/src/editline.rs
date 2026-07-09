@@ -254,6 +254,24 @@ impl EditLine {
     /// replacement character). If you need byte-exact input, use
     /// [`readline_bytes`](Self::readline_bytes).
     ///
+    /// # Colored prompts
+    ///
+    /// The prompt may contain ANSI color escape sequences; they are
+    /// automatically marked as non-printing so libedit's cursor positioning
+    /// stays correct. **The prompt must end with a visible character**
+    /// (typically a space) *after* any trailing reset sequence. For example,
+    /// use `"\x1b[1;32m>\x1b[0m "` (space after `\x1b[0m`), not
+    /// `"\x1b[1;32m> \x1b[0m"` (space before it). libedit silently drops
+    /// the last escape if no printable character follows it, causing the
+    /// color to leak into typed text.
+    ///
+    /// On macOS, Apple ships a 2012-era libedit that predates the
+    /// `re_putliteral` mechanism for rendering escape sequences within the
+    /// prompt. ANSI escapes are correctly excluded from the width calculation
+    /// (cursor positioning is accurate), but they are not emitted to the
+    /// terminal, so the prompt appears uncolored. Colored prompts work
+    /// correctly on Linux and modern BSD systems.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Interrupted`] if the read was interrupted by a
@@ -267,29 +285,11 @@ impl EditLine {
 
     /// Read a line from the user as raw bytes, displaying the given prompt.
     ///
-    /// Returns `Ok(None)` on end-of-file. The trailing newline, if present,
-    /// is removed. Unlike [`readline`](Self::readline), the bytes are
-    /// returned exactly as libedit produced them, with no UTF-8 validation.
-    ///
-    /// The prompt may contain ANSI color escape sequences; they are
-    /// automatically marked as non-printing so libedit's cursor positioning
-    /// stays correct.
-    ///
-    /// # macOS color prompt limitation
-    ///
-    /// Apple ships a 2012-era libedit that predates the `re_putliteral`
-    /// mechanism for rendering escape sequences within the prompt. On macOS,
-    /// ANSI escapes in the prompt are correctly excluded from the width
-    /// calculation (cursor positioning is accurate), but they are **not
-    /// emitted to the terminal** — so the prompt appears uncolored. This is
-    /// a known system-libedit limitation. Colored prompts work correctly on
-    /// Linux and modern BSD systems.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Interrupted`] if signal
-    /// handling is enabled and the read is interrupted by a signal such as
-    /// Ctrl-C.
+    /// Behaves identically to [`readline`](Self::readline) except the bytes
+    /// are returned exactly as libedit produced them, with no UTF-8
+    /// validation or lossy conversion. See [`readline`](Self::readline) for
+    /// full documentation on prompt formatting, colored prompts, and error
+    /// conditions.
     pub fn readline_bytes(&mut self, prompt: impl AsRef<str>) -> Result<Option<Vec<u8>>> {
         // Store the prompt in the context as a wide (wchar_t) string. The
         // prompt trampoline (registered once in `new` via el_wset with
@@ -730,7 +730,7 @@ impl EditLine {
     /// libedit's default editor mode is a **compile-time decision** by the
     /// system packager (`#ifdef VIDEFAULT` in libedit's `map.c`). Some
     /// distributions (notably Debian/Ubuntu) compile with `VIDEFAULT`,
-    /// making vi mode the default — which has fundamentally different cursor
+    /// making vi mode the default, which has fundamentally different cursor
     /// semantics and key bindings from emacs mode. The user's `~/.editrc`
     /// can also override the mode at runtime.
     ///
@@ -1746,8 +1746,8 @@ mod tests {
     #[test]
     fn preserves_multibyte_text() {
         // A non-ASCII char adjacent to an escape must not be split.
-        let input = "café \x1b[0m";
-        let expected = format!("café {d}\x1b[0m{d}", d = d());
+        let input = "caf\u{00e9} \x1b[0m";
+        let expected = format!("caf\u{00e9} {d}\x1b[0m{d}", d = d());
         assert_eq!(wrap_ansi_escapes(input), expected);
     }
 
