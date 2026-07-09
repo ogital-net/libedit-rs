@@ -99,10 +99,12 @@ struct Context {
 /// The key-binding style used for line editing.
 ///
 /// Corresponds to libedit's `EL_EDITOR` parameter and the `editor` line in
-/// `.editrc`.
+/// `.editrc`. The actual default depends on how the system's libedit was
+/// compiled (see [`EditLine::set_editor`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Editor {
-    /// Emacs-style key bindings (libedit's default).
+    /// Emacs-style key bindings (Ctrl-A/E/F/B, etc.). Historically libedit's
+    /// default, but not guaranteed on all distributions.
     Emacs,
     /// vi-style key bindings, with distinct insert and command modes.
     Vi,
@@ -272,6 +274,16 @@ impl EditLine {
     /// The prompt may contain ANSI color escape sequences; they are
     /// automatically marked as non-printing so libedit's cursor positioning
     /// stays correct.
+    ///
+    /// # macOS color prompt limitation
+    ///
+    /// Apple ships a 2012-era libedit that predates the `re_putliteral`
+    /// mechanism for rendering escape sequences within the prompt. On macOS,
+    /// ANSI escapes in the prompt are correctly excluded from the width
+    /// calculation (cursor positioning is accurate), but they are **not
+    /// emitted to the terminal** — so the prompt appears uncolored. This is
+    /// a known system-libedit limitation. Colored prompts work correctly on
+    /// Linux and modern BSD systems.
     ///
     /// # Errors
     ///
@@ -713,8 +725,19 @@ impl EditLine {
 
     /// Select the key-binding style ([`Editor::Emacs`] or [`Editor::Vi`]).
     ///
-    /// Equivalent to the `editor` setting in `.editrc`. Emacs bindings are the
-    /// default.
+    /// # Important: no guaranteed default
+    ///
+    /// libedit's default editor mode is a **compile-time decision** by the
+    /// system packager (`#ifdef VIDEFAULT` in libedit's `map.c`). Some
+    /// distributions (notably Debian/Ubuntu) compile with `VIDEFAULT`,
+    /// making vi mode the default — which has fundamentally different cursor
+    /// semantics and key bindings from emacs mode. The user's `~/.editrc`
+    /// can also override the mode at runtime.
+    ///
+    /// **Applications that depend on a specific editing style should call
+    /// this method explicitly** rather than assuming the default. For example,
+    /// a CLI that expects Ctrl-A/Ctrl-E/Ctrl-F should call `set_editor(Editor::Emacs)`
+    /// after [`new`](Self::new).
     ///
     /// # Errors
     ///

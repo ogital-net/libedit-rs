@@ -144,6 +144,7 @@ fn print_context_help(out: &mut impl Write, prefix: &str) {
 
 fn main() -> Result<()> {
     let mut editor = EditLine::new_with_locale("cli")?;
+    editor.set_editor(libedit::Editor::Emacs)?;
     let mut history = History::with_size(1000);
     let mut tokenizer = Tokenizer::new(None)?;
     let color = supports_color();
