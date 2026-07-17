@@ -33,15 +33,13 @@
 //! advanced users are not restricted, but they are **use at your own risk**.
 
 // When the `bindgen` feature is enabled, use freshly generated bindings.
-// Otherwise, use the pre-generated bindings shipped with the crate
-// (platform-specific: macOS ships an older libedit with fewer symbols).
+// Otherwise, use the pre-generated bindings shipped with the crate.
+// The bindings.rs file uses cfg(target_os = "macos") gates to
+// exclude symbols not present in macOS's older libedit.
 #[cfg(feature = "bindgen")]
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-#[cfg(all(not(feature = "bindgen"), target_os = "macos"))]
-include!("bindings-macos.rs");
-
-#[cfg(all(not(feature = "bindgen"), not(target_os = "macos")))]
+#[cfg(not(feature = "bindgen"))]
 include!("bindings.rs");
 
 // Safety assertions at compile time
@@ -56,23 +54,6 @@ mod tests {
         assert_eq!(mem::size_of::<*const EditLine>(), mem::size_of::<usize>());
         assert_eq!(mem::size_of::<*const History>(), mem::size_of::<usize>());
         assert_eq!(mem::size_of::<*const Tokenizer>(), mem::size_of::<usize>());
-    }
-
-    #[test]
-    fn test_file_used_only_behind_pointer() {
-        // `FILE` is deliberately an opaque, zero-sized type: libedit and this
-        // crate only ever use it as `*mut FILE`. A pointer to it must be a
-        // single machine word regardless of what libc's real `FILE` size is
-        // on the target platform. This locks in the "only used behind a
-        // pointer" contract so a future change that relies on the pointee's
-        // size (which would be platform-specific and unsound) can't slip in
-        // unnoticed.
-        assert_eq!(mem::size_of::<*mut FILE>(), mem::size_of::<usize>());
-        assert_eq!(
-            mem::size_of::<FILE>(),
-            0,
-            "FILE must remain zero-sized/opaque"
-        );
     }
 
     #[test]

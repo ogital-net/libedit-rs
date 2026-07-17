@@ -34,15 +34,10 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::ops::Deref;
 
-use libedit_sys::wchar_t;
-
 /// The wide code unit used by these types.
 ///
-/// This is an alias for [`libedit_sys::wchar_t`] (re-exported from
-/// [`libc::wchar_t`]), which is a 32-bit integer on all platforms this crate
-/// targets (`u32` on aarch64-linux, `i32` on x86_64-linux and macOS). Each
-/// unit holds a single Unicode scalar value.
-pub(crate) type WChar = libedit_sys::wchar_t;
+/// This is an alias for [`libc::wchar_t`]
+pub(crate) type WChar = libc::wchar_t;
 
 /// An error returned when constructing a [`WCString`] from input that contains
 /// an interior NUL scalar (`U+0000`).
@@ -598,14 +593,14 @@ impl ToOwned for WCStr {
 }
 
 #[inline]
-pub(crate) fn char_from_c(c: wchar_t) -> char {
+pub(crate) fn char_from_c(c: WChar) -> char {
     #[allow(clippy::unnecessary_cast)] // possibly signed wchar_t
     char::from_u32(c as u32).unwrap_or('\u{FFFD}')
 }
 
 #[inline]
-pub(crate) fn char_to_c(c: char) -> wchar_t {
-    c as wchar_t
+pub(crate) fn char_to_c(c: char) -> WChar {
+    c as WChar
 }
 
 #[cfg(test)]

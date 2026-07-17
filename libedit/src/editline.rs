@@ -1,10 +1,10 @@
 //! Safe wrapper around libedit's `EditLine` editor.
 
+use libc::{c_uchar, FILE};
 use libedit_sys::*;
 use std::ffi::{c_void, CStr, CString};
 use std::io::Write;
 use std::marker::PhantomData;
-use std::os::raw::c_uchar;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +22,7 @@ use crate::{shim, term};
 /// ANSI escape sequences in this delimiter so colored prompts and hints keep
 /// the cursor math correct. `0x01` (SOH) matches readline's convention and is
 /// vanishingly unlikely to appear in real prompt text.
-const PROMPT_ESC_DELIM: wchar_t = 0x01;
+const PROMPT_ESC_DELIM: WChar = 0x01;
 
 /// Look-ahead FIFO for bytes read while matching a hint-accept key sequence
 /// (right-arrow / `^F`) that turned out to be something else; they are
@@ -328,7 +328,7 @@ impl EditLine {
         // Trim the trailing newline in place in libedit's wide buffer
         // (zero copy), then borrow the result. The same wide pointer
         // feeds both auto-add history and the return value.
-        let wcstr = unsafe { WCStr::from_ptr_mut(line_ptr as *mut wchar_t) };
+        let wcstr = unsafe { WCStr::from_ptr_mut(line_ptr as *mut WChar) };
         wcstr.trim_end();
 
         // Auto-add to history if enabled, from the wide buffer directly.
@@ -349,7 +349,7 @@ impl EditLine {
         if line.is_empty() {
             return;
         }
-        if ctx.ignore_space && line.units().first() == Some(&(' ' as wchar_t)) {
+        if ctx.ignore_space && line.units().first() == Some(&(' ' as WChar)) {
             return;
         }
         if let Some(ref mut history) = ctx.history {
@@ -971,9 +971,9 @@ impl Drop for EditLine {
 }
 
 /// Prompt trampoline registered with libedit's `EL_PROMPT_ESC` via `el_wset`
-extern "C" fn prompt_trampoline(el: *mut libedit_sys::EditLine) -> *mut wchar_t {
+extern "C" fn prompt_trampoline(el: *mut libedit_sys::EditLine) -> *mut WChar {
     let ctx = context_from(el);
-    ctx.prompt_wide.as_ptr() as *mut wchar_t
+    ctx.prompt_wide.as_ptr().cast_mut()
 }
 
 /// Completion trampoline registered via `EL_ADDFN` and bound to Tab.
@@ -1045,7 +1045,7 @@ const ESC_SEQ_TIMEOUT_MS: i32 = 50;
 /// This is the FFI entry point libedit calls; it guards the whole body against
 /// panics (unwinding across the C boundary is UB) and returns `-1` (read
 /// error) if one occurs. The real logic lives in [`getcfn_impl`].
-unsafe extern "C" fn getcfn_trampoline(el: *mut libedit_sys::EditLine, out: *mut wchar_t) -> i32 {
+unsafe extern "C" fn getcfn_trampoline(el: *mut libedit_sys::EditLine, out: *mut WChar) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| unsafe { getcfn_impl(el, out) }));
     result.unwrap_or(-1)
 }
@@ -1060,7 +1060,7 @@ unsafe extern "C" fn getcfn_trampoline(el: *mut libedit_sys::EditLine, out: *mut
 ///
 /// # Safety
 /// `el` must be a valid editor; `out` a valid `wchar_t` pointer.
-unsafe fn getcfn_impl(el: *mut libedit_sys::EditLine, out: *mut wchar_t) -> i32 {
+unsafe fn getcfn_impl(el: *mut libedit_sys::EditLine, out: *mut WChar) -> i32 {
     // Recover the context once. Helpers take `ctx` by reborrow (never
     // re-derive from `el`), so only one `&mut Context` is ever live.
     let ctx = context_from(el);
@@ -1068,7 +1068,7 @@ unsafe fn getcfn_impl(el: *mut libedit_sys::EditLine, out: *mut wchar_t) -> i32 
     // Replay queued look-ahead bytes first, so an escape sequence reaches
     // libedit's keymap intact.
     if let Some(b) = ctx.pending.pop() {
-        unsafe { *out = b as wchar_t };
+        unsafe { *out = b as WChar };
         return 1;
     }
 
@@ -1094,7 +1094,7 @@ unsafe fn getcfn_impl(el: *mut libedit_sys::EditLine, out: *mut wchar_t) -> i32 
             if unsafe { accept_hint(el, ctx, out) } {
                 return 1;
             }
-            unsafe { *out = CTRL_F as wchar_t };
+            unsafe { *out = CTRL_F as WChar };
             1
         }
         // `ESC`: classify the sequence that follows.
@@ -1118,7 +1118,7 @@ unsafe fn getcfn_impl(el: *mut libedit_sys::EditLine, out: *mut wchar_t) -> i32 
                 for &b in &trailing[..tlen] {
                     ctx.pending.push(b);
                 }
-                unsafe { *out = ESC as wchar_t };
+                unsafe { *out = ESC as WChar };
                 1
             }
         },
@@ -1331,7 +1331,7 @@ unsafe fn insert_paste(
     el: *mut libedit_sys::EditLine,
     ctx: &mut Context,
     in_fd: i32,
-    _out: *mut wchar_t,
+    _out: *mut WChar,
 ) -> bool {
     ctx.paste_buf.clear();
     unsafe { read_paste_body(in_fd, &mut ctx.paste_buf) };
@@ -1448,13 +1448,13 @@ fn decode_utf8(bytes: &[u8]) -> u32 {
 ///
 /// # Safety
 /// `in_fd` must be valid and readable; `out` must be a valid `wchar_t` pointer.
-unsafe fn decode_utf8_char(in_fd: i32, lead: u8, out: *mut wchar_t) -> i32 {
+unsafe fn decode_utf8_char(in_fd: i32, lead: u8, out: *mut WChar) -> i32 {
     // Determine how many bytes this UTF-8 sequence occupies from the lead
     // byte. ASCII (and, defensively, any stray continuation/invalid lead byte,
     // which `utf8_char_len` maps to 1) takes the fast path and returns as-is.
     let total = utf8_char_len(lead);
     if total == 1 {
-        unsafe { *out = lead as wchar_t };
+        unsafe { *out = lead as WChar };
         return 1;
     }
 
@@ -1488,7 +1488,7 @@ unsafe fn decode_utf8_char(in_fd: i32, lead: u8, out: *mut wchar_t) -> i32 {
         }
         _ => unreachable!("total is 2, 3, or 4 here"),
     };
-    unsafe { *out = char::from_u32(cp).unwrap_or('\u{FFFD}') as wchar_t };
+    unsafe { *out = char::from_u32(cp).unwrap_or('\u{FFFD}') as WChar };
     1
 }
 
@@ -1503,7 +1503,7 @@ unsafe fn decode_utf8_char(in_fd: i32, lead: u8, out: *mut wchar_t) -> i32 {
 ///
 /// # Safety
 /// `out` must be a valid, writable `wchar_t` pointer.
-unsafe fn accept_hint(el: *mut libedit_sys::EditLine, ctx: &mut Context, out: *mut wchar_t) -> bool {
+unsafe fn accept_hint(el: *mut libedit_sys::EditLine, ctx: &mut Context, out: *mut WChar) -> bool {
     // No hint pending. This also guards `units()` below, which derefs
     // `WCString -> WCStr` and asserts NUL-termination: `draw_hint_ghost` leaves
     // `hint_buf` empty and unterminated on lines it draws nothing for.
@@ -1516,7 +1516,7 @@ unsafe fn accept_hint(el: *mut libedit_sys::EditLine, ctx: &mut Context, out: *m
     let units = ctx.hint_buf.units();
     let (&first, rest) = units.split_first().expect("hint_buf is non-empty");
 
-    unsafe { *out = first as wchar_t };
+    unsafe { *out = first as WChar };
 
     // The suffix of a NUL-terminated buffer is itself a NUL-terminated wide
     // string, so push one scalar in -- no copy. `el_wpush` `wcsdup`s its
@@ -1816,8 +1816,8 @@ unsafe fn line_and_cursor(info: &LineInfoW, line: &mut String) -> (usize, usize)
     // Use integer-cast arithmetic rather than `.offset_from()`: the three
     // pointers come from libedit's internal C allocation and therefore do not
     // share Rust provenance
-    let len = (lastchar as usize - buffer as usize) / std::mem::size_of::<wchar_t>();
-    let cursor_pos = (cursor as usize - buffer as usize) / std::mem::size_of::<wchar_t>();
+    let len = (lastchar as usize - buffer as usize) / std::mem::size_of::<WChar>();
+    let cursor_pos = (cursor as usize - buffer as usize) / std::mem::size_of::<WChar>();
     let units = unsafe { std::slice::from_raw_parts(buffer, len) };
 
     for u in units.iter().copied() {

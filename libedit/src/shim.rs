@@ -4,9 +4,9 @@
 //! small C helpers bridge the gap by exposing fixed-argument wrappers
 //! around the common variadic call patterns.
 
+use libc::{c_char, c_uchar, wchar_t};
 use libedit_sys::*;
 use std::ffi::CStr;
-use std::os::raw::{c_char, c_uchar};
 
 /// Trampoline type for the libedit prompt callback: `wchar_t *(*)(EditLine *)`.
 pub(crate) type PromptFn = unsafe extern "C" fn(*mut EditLine) -> *mut wchar_t;

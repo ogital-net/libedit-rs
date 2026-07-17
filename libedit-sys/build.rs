@@ -91,7 +91,7 @@ fn generate_bindings() {
         .blocklist_type("__darwin_off_t")
         .ctypes_prefix("libc")
         .raw_line("use libc;")
-        .raw_line("pub use libc::{FILE, wchar_t};")
+        .raw_line("use libc::{FILE, wchar_t};")
         .derive_debug(true)
         .derive_default(true)
         .generate_comments(false)
