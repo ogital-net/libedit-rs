@@ -455,11 +455,11 @@ impl WCStr {
         }
     }
 
-    /// Trim leading whitespace (spaces and `\n`) by shifting content
-    /// forward. The caller should have already called [`trim_end`](Self::trim_end)
-    /// so the tail after the shift is NUL-padded.
-    pub(crate) fn trim_start(&mut self) {
-        let n = self.inner.len().wrapping_sub(1);
+    /// Return a sub-slice with leading whitespace (spaces and `\n`)
+    /// removed. Because the backing buffer shares the trailing NUL, the
+    /// returned `&WCStr` is valid without any mutation.
+    pub(crate) fn trim_start(&self) -> &WCStr {
+        let n = self.inner.len().wrapping_sub(1); // index of NUL terminator
         let mut start = 0;
         while start < n {
             let c = self.inner[start];
@@ -468,26 +468,16 @@ impl WCStr {
             }
             start += 1;
         }
-        if start == n {
-            self.inner[0] = 0;
-            return;
-        }
-        if start > 0 {
-            // +1 to include the trailing null
-            let new_len = n - start + 1;
-            unsafe {
-                let ptr = self.inner.as_mut_ptr();
-                std::ptr::copy(ptr.add(start), ptr, new_len);
-            }
-        }
+        // SAFETY: self.inner[start..] still ends with the NUL terminator,
+        // satisfying the WCStr invariant.
+        unsafe { WCStr::from_units_with_nul_unchecked(&self.inner[start..]) }
     }
 
-    /// Trim leading and trailing whitespace (spaces and `\n`) in place.
-    /// Mirrors [`str::trim`]. Calls [`trim_end`](Self::trim_end) first so
-    /// the tail after [`trim_start`](Self::trim_start) is already NUL-padded.
-    pub(crate) fn trim(&mut self) {
+    /// Trim trailing whitespace in place, then return a sub-slice with
+    /// leading whitespace removed. Mirrors [`str::trim`].
+    pub(crate) fn trim(&mut self) -> &WCStr {
         self.trim_end();
-        self.trim_start();
+        self.trim_start()
     }
 
     /// Return a pointer to the NUL-terminated wide buffer, suitable for
@@ -841,38 +831,27 @@ mod tests {
 
     #[test]
     fn wcstr_trim_start_shifts_content() {
-        let mut ws = WCString::from_str("  hi").unwrap();
-        {
-            let wcstr: &mut WCStr =
-                unsafe { &mut *(ws.inner.as_mut_slice() as *mut [WChar] as *mut WCStr) };
-            wcstr.trim_start();
-        }
-        let wcstr = ws.as_wcstr();
-        assert_eq!(wcstr.to_string_lossy(), "hi");
+        let ws = WCString::from_str("  hi").unwrap();
+        let trimmed = ws.as_wcstr().trim_start();
+        assert_eq!(trimmed.to_string_lossy(), "hi");
     }
 
     #[test]
     fn wcstr_trim_start_all_whitespace() {
-        let mut ws = WCString::from_str("   ").unwrap();
-        {
-            let wcstr: &mut WCStr =
-                unsafe { &mut *(ws.inner.as_mut_slice() as *mut [WChar] as *mut WCStr) };
-            wcstr.trim_start();
-        }
-        let wcstr = ws.as_wcstr();
-        assert!(wcstr.is_empty());
+        let ws = WCString::from_str("   ").unwrap();
+        let trimmed = ws.as_wcstr().trim_start();
+        assert!(trimmed.is_empty());
     }
 
     #[test]
     fn wcstr_trim_both() {
         let mut ws = WCString::from_str(" x ").unwrap();
-        {
+        let trimmed = {
             let wcstr: &mut WCStr =
                 unsafe { &mut *(ws.inner.as_mut_slice() as *mut [WChar] as *mut WCStr) };
-            wcstr.trim();
-        }
-        let wcstr = ws.as_wcstr();
-        assert_eq!(wcstr.to_string_lossy(), "x");
+            wcstr.trim()
+        };
+        assert_eq!(trimmed.to_string_lossy(), "x");
     }
 
     // ---- from_ptr_mut ----

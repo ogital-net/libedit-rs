@@ -333,9 +333,9 @@ impl EditLine {
 
         // Auto-add to history if enabled, from the wide buffer directly.
         self.maybe_auto_add_history(wcstr);
-        wcstr.trim_start();
+        let trimmed = wcstr.trim_start();
 
-        Ok(wcstr.to_string_lossy())
+        Ok(trimmed.to_string_lossy())
     }
 
     /// Conditionally add a line to the attached history (for auto_add_history).
