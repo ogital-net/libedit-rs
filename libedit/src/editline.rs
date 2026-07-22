@@ -94,6 +94,19 @@ struct Context {
     ignore_space: bool,
     /// Cached terminal width in columns, sampled once per `readline` call.
     term_cols: u16,
+    /// Idle timeout in milliseconds. `None` means no timeout (block forever).
+    /// When set, the character reader polls stdin; if no input arrives within
+    /// this duration, readline returns `Error::Timeout`.
+    idle_timeout_ms: Option<i32>,
+    /// How many ms before the idle timeout to fire the warning callback.
+    /// `None` means no warning (timeout fires immediately).
+    idle_warn_before_ms: Option<i32>,
+    /// Callback invoked once when the idle warning fires. Writes to the
+    /// terminal output stream.
+    idle_warn_fn: Option<Box<dyn Fn(&mut dyn Write)>>,
+    /// Flag set by `getcfn_impl` when a timeout fires, consumed by `readline`
+    /// to distinguish timeout from EOF.
+    timed_out: bool,
     /// Owned history buffer. Set by `set_history`; accessed by
     /// `auto_add_history`. `None` until a history is attached.
     history: Option<History>,
@@ -138,6 +151,10 @@ impl Context {
             auto_add_history: false,
             ignore_space: false,
             term_cols: 0,
+            idle_timeout_ms: None,
+            idle_warn_before_ms: None,
+            idle_warn_fn: None,
+            timed_out: false,
             history: None,
             #[cfg(unix)]
             _signal_guard: None,
@@ -312,6 +329,12 @@ impl EditLine {
         let line_ptr = unsafe { shim::el_wgets_err(self.inner.as_ptr(), &mut count, &mut err) };
 
         if line_ptr.is_null() || count < 0 {
+            // An idle timeout returns 0 (like EOF) from getcfn, but sets the
+            // timed_out flag so we can distinguish the two.
+            if context.timed_out {
+                context.timed_out = false;
+                return Err(Error::Timeout);
+            }
             // libedit returns NULL for both EOF (Ctrl-D) and a signal-
             // interrupted read (Ctrl-C, with EL_SIGNAL enabled). Only errno
             // distinguishes them: a signal leaves errno == EINTR.
@@ -611,6 +634,74 @@ impl EditLine {
     pub fn set_history_ignore_space(&mut self, enabled: bool) {
         unsafe {
             (*self.context).ignore_space = enabled;
+        }
+    }
+
+    /// Set an idle timeout for [`readline`](Self::readline).
+    ///
+    /// When configured, if no keystroke arrives within `timeout`,
+    /// [`readline`](Self::readline) returns [`Error::Timeout`]. The timeout
+    /// resets on every keystroke -- it measures inactivity, not total
+    /// wall-clock time spent in readline. Pass `None` to disable (the
+    /// default).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use libedit::EditLine;
+    /// # let mut el = EditLine::new("example").unwrap();
+    /// // Disconnect after 15 minutes of inactivity.
+    /// el.set_idle_timeout(Some(std::time::Duration::from_secs(900)));
+    /// ```
+    pub fn set_idle_timeout(&mut self, timeout: Option<std::time::Duration>) {
+        let ms = timeout.map(|d| {
+            let millis = d.as_millis();
+            if millis > i32::MAX as u128 {
+                i32::MAX
+            } else {
+                millis as i32
+            }
+        });
+        unsafe {
+            (*self.context).idle_timeout_ms = ms;
+        }
+    }
+
+    /// Set a warning that fires before the idle timeout expires.
+    ///
+    /// `before_timeout` specifies how far in advance of the timeout to invoke
+    /// the callback. The callback receives a writer connected to the terminal
+    /// and should emit a short warning message (no trailing newline needed).
+    ///
+    /// If no keystroke arrives after the warning, the full timeout fires and
+    /// [`readline`](Self::readline) returns [`Error::Timeout`]. If the user
+    /// presses any key after the warning, input resumes normally and the
+    /// timer resets.
+    ///
+    /// Requires an idle timeout to be set via
+    /// [`set_idle_timeout`](Self::set_idle_timeout). Has no effect without
+    /// one.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use std::io::Write;
+    /// # use libedit::EditLine;
+    /// # let mut el = EditLine::new("example").unwrap();
+    /// el.set_idle_timeout(Some(std::time::Duration::from_secs(900)));
+    /// el.set_idle_warning(std::time::Duration::from_secs(60), |w| {
+    ///     let _ = write!(w, "% session will expire in 60 seconds");
+    /// });
+    /// ```
+    pub fn set_idle_warning(
+        &mut self,
+        before_timeout: std::time::Duration,
+        callback: impl Fn(&mut dyn Write) + 'static,
+    ) {
+        let ms = before_timeout.as_millis().min(i32::MAX as u128) as i32;
+        unsafe {
+            (*self.context).idle_warn_before_ms = Some(ms);
+            (*self.context).idle_warn_fn = Some(Box::new(callback));
         }
     }
 
@@ -1078,11 +1169,20 @@ unsafe fn getcfn_impl(el: *mut libedit_sys::EditLine, out: *mut WChar) -> i32 {
 
     let in_fd = ctx.streams[0].1;
 
-    // Read the lead byte. This blocks until input arrives, retrying across
-    // benign signals (resize/continue) like libedit's own `read_char`.
-    let lead = match unsafe { read_byte(in_fd) } {
+    // Read the lead byte. This blocks until input arrives (or the idle
+    // timeout fires), retrying across benign signals (resize/continue)
+    // like libedit's own `read_char`.
+    //
+    // When a warning callback is configured, the timeout is split into two
+    // phases: wait (timeout - warn_before), fire the warning, then wait
+    // the remaining warn_before duration.
+    let lead = match read_byte_idle(el, ctx) {
         ReadByte::Byte(b) => b,
         ReadByte::Eof => return 0,
+        ReadByte::Timeout => {
+            ctx.timed_out = true;
+            return 0;
+        }
         // Both interrupt and error yield -1; errno (EINTR vs other) lets
         // `readline` tell Ctrl-C from a real failure.
         ReadByte::Interrupted | ReadByte::Error => return -1,
@@ -1138,6 +1238,58 @@ enum ReadByte {
     Interrupted,
     /// A genuine read error.
     Error,
+    /// The idle timeout expired with no input.
+    Timeout,
+}
+
+/// Two-phase idle read: if a warning callback is configured, splits the
+/// timeout into (timeout - warn_before) + warn_before, firing the warning
+/// in between. Otherwise delegates directly to [`read_byte`].
+///
+/// This lives at the `Context` level (not inside `read_byte`) because it
+/// needs access to the stdout stream to print the warning and the editor
+/// pointer to force a prompt redisplay.
+///
+/// # Safety
+/// `el` must be a valid editor pointer.
+unsafe fn read_byte_idle(el: *mut libedit_sys::EditLine, ctx: &mut Context) -> ReadByte {
+    let in_fd = ctx.streams[0].1;
+
+    // Compute phase-1 duration: if we have both a timeout and a warning
+    // offset, phase 1 = timeout - warn_before. Otherwise just use the
+    // full timeout (or None for blocking forever).
+    let (phase1_ms, phase2_ms) = match (ctx.idle_timeout_ms, ctx.idle_warn_before_ms) {
+        (Some(total), Some(before)) if before < total && ctx.idle_warn_fn.is_some() => {
+            (Some(total - before), Some(before))
+        }
+        (timeout, _) => (timeout, None),
+    };
+
+    // Phase 1: wait for input (or warn on timeout).
+    match unsafe { read_byte(in_fd, phase1_ms) } {
+        ReadByte::Timeout => {}
+        other => return other,
+    }
+
+    // Phase 1 timed out. If no phase 2, this is the final timeout.
+    let Some(remaining_ms) = phase2_ms else {
+        return ReadByte::Timeout;
+    };
+
+    // Fire the warning callback, writing to the terminal.
+    if let Some(ref warn_fn) = ctx.idle_warn_fn {
+        let mut writer = OutWriter::new(ctx.streams[1].0);
+        let _ = writer.write_all(b"\n");
+        warn_fn(&mut writer);
+        let _ = writer.write_all(b"\n");
+        let _ = writer.flush();
+    }
+
+    // Redisplay the prompt + current line so the user sees where they are.
+    unsafe { shim::el_set_int(el, EL_REFRESH as i32, 0) };
+
+    // Phase 2: wait the remaining time for the user to wake up.
+    unsafe { read_byte(in_fd, Some(remaining_ms)) }
 }
 
 /// Blocking read of one byte from `fd`, mirroring libedit's own `read_char`
@@ -1149,15 +1301,44 @@ enum ReadByte {
 ///   (flagged by [`TERMINATING_SIGNAL`]) instead returns [`ReadByte::Interrupted`].
 /// * `EAGAIN`/`EWOULDBLOCK` clears non-blocking mode on `fd` and retries, like
 ///   libedit's `read__fixio`.
+/// * When `timeout_ms` is `Some(ms)`, polls `fd` first; returns
+///   [`ReadByte::Timeout`] if no data arrives within that duration.
 ///
 /// # Safety
 /// `fd` must be a valid, readable file descriptor.
-unsafe fn read_byte(fd: i32) -> ReadByte {
+unsafe fn read_byte(fd: i32, timeout_ms: Option<i32>) -> ReadByte {
     loop {
         // Clear the terminating-signal flag before each attempt so we only
         // observe a signal delivered during *this* read.
         #[cfg(unix)]
         TERMINATING_SIGNAL.store(false, Ordering::Relaxed);
+
+        // If an idle timeout is configured, poll before blocking.
+        if let Some(ms) = timeout_ms {
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let r = unsafe { libc::poll(&mut pfd, 1, ms) };
+            if r == 0 {
+                return ReadByte::Timeout;
+            }
+            if r < 0 {
+                let err = std::io::Error::last_os_error();
+                match err.raw_os_error() {
+                    Some(libc::EINTR) => {
+                        #[cfg(unix)]
+                        if TERMINATING_SIGNAL.load(Ordering::Relaxed) {
+                            return ReadByte::Interrupted;
+                        }
+                        continue;
+                    }
+                    _ => return ReadByte::Error,
+                }
+            }
+            // poll said readable -- fall through to read()
+        }
 
         let mut b: u8 = 0;
         let n = unsafe { libc::read(fd, &mut b as *mut u8 as *mut c_void, 1) };

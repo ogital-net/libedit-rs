@@ -24,6 +24,7 @@ use libedit::editline::Hinter;
 use libedit::term::supports_color;
 use libedit::{Action, EditLine, Error, EventHandler, History, LineContext, Result, Tokenizer};
 use std::path::PathBuf;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Command table
@@ -212,6 +213,12 @@ fn main() -> Result<()> {
     editor.set_history_ignore_space(true);
     editor.set_history(history);
 
+    // -- Idle timeout: disconnect after 60s, warn at 30s remaining --
+    editor.set_idle_timeout(Some(Duration::from_secs(60)));
+    editor.set_idle_warning(Duration::from_secs(30), |w| {
+        let _ = write!(w, "\x1b[1;33m% session will expire in 30 seconds\x1b[0m");
+    });
+
     // -- Banner --
     if color {
         println!(
@@ -234,6 +241,10 @@ fn main() -> Result<()> {
             Ok(line) => line,
             Err(Error::Eof) => {
                 println!();
+                break;
+            }
+            Err(Error::Timeout) => {
+                println!("\n% session timed out due to inactivity");
                 break;
             }
             Err(Error::Interrupted) => {

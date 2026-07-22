@@ -54,6 +54,12 @@ pub enum Error {
     /// End-of-file was received (e.g. the user pressed Ctrl-D on an empty
     /// line).
     Eof,
+
+    /// The idle timeout expired with no input from the user.
+    ///
+    /// Only produced when an idle timeout has been configured via
+    /// [`EditLine::set_idle_timeout`](crate::EditLine::set_idle_timeout).
+    Timeout,
 }
 
 impl Error {
@@ -76,6 +82,7 @@ impl fmt::Display for Error {
             Error::NotFound => write!(f, "history entry not found"),
             Error::Interrupted => write!(f, "read interrupted by signal"),
             Error::Eof => write!(f, "end of file"),
+            Error::Timeout => write!(f, "idle timeout expired"),
         }
     }
 }
